@@ -1,0 +1,14 @@
+{
+  "appId": "in.dariai.arcade",
+  "appName": "DaRI AI Arcade",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  }
+}

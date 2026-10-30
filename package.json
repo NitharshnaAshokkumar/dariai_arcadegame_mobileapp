@@ -1,0 +1,36 @@
+{
+  "name": "dariai-arcade-mobile",
+  "version": "1.0.0",
+  "description": "DaRI AI Arcade — Cross-Platform Mobile (Android APK) and Desktop Application",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "stop": "powershell -Command \"Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }\"",
+    "desktop": "electron .",
+    "cap:sync": "cap sync android",
+    "cap:build": "cap sync android && cd android && gradlew.bat assembleDebug",
+    "build:apk": "node scripts/build-apk.js",
+    "open:android": "cap open android"
+  },
+  "keywords": [
+    "dariai",
+    "arcade",
+    "ai",
+    "capacitor",
+    "android",
+    "mobile",
+    "desktop",
+    "electron"
+  ],
+  "author": "DaRI AI Team",
+  "license": "MIT",
+  "dependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}
