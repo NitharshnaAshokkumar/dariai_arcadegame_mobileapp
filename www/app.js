@@ -1,3 +1,10 @@
+// ============================================================================
+// GOOGLE OAUTH CONFIGURATION
+// You can paste your Google Cloud Console OAuth 2.0 Web Client ID below,
+// OR inside 'google-auth-config.json' in the project root folder.
+// ============================================================================
+const GOOGLE_CLIENT_ID_OVERRIDE = "YOUR_GOOGLE_CLIENT_ID_HERE.apps.googleusercontent.com";
+
 // Prompt Mirror - client-side game logic.
 // All OpenAI calls are made directly from this browser tab, using the
 // API key you entered once (saved locally by the tiny local server).
@@ -333,7 +340,10 @@ const state = {
 const identity = {
   id: null,
   name: null,
+  email: null,
   role: null, // "participant" | "admin"
+  avatar: null,
+  authProvider: null,
   heartbeatHandle: null,
 };
 
@@ -427,7 +437,10 @@ function applyAdminGating() {
 function applyIdentity(player) {
   identity.id = player.id;
   identity.name = player.name;
+  identity.email = player.email || null;
   identity.role = player.role === "admin" ? "admin" : "participant";
+  identity.avatar = player.avatar || null;
+  identity.authProvider = player.authProvider || null;
   saveIdentityToStorage();
   updateIdentityBadge();
   applyAdminGating();
@@ -475,16 +488,322 @@ function handleSignedOutElsewhere() {
   showScreen("identity");
 }
 
+// ---------------------------------------------------------------------
+// Strictly Google OAuth Authentication State & Handlers
+// ---------------------------------------------------------------------
+
+const authState = {
+  pendingGoogleUser: null,
+  googleClientId: (typeof GOOGLE_CLIENT_ID_OVERRIDE !== "undefined" && !GOOGLE_CLIENT_ID_OVERRIDE.includes("YOUR_GOOGLE_CLIENT_ID_HERE"))
+    ? GOOGLE_CLIENT_ID_OVERRIDE.trim()
+    : "",
+};
+
+function showAuthToast(title, body, type = "info") {
+  const container = el("auth-toast-container");
+  if (!container) return;
+  const toast = document.createElement("div");
+  toast.className = `auth-toast ${type}`;
+  let icon = "ℹ️";
+  if (type === "success") icon = "✅";
+  if (type === "error") icon = "⚠️";
+
+  toast.innerHTML = `
+    <span class="auth-toast-icon">${icon}</span>
+    <div class="auth-toast-content">
+      <div class="auth-toast-title">${title}</div>
+      <div class="auth-toast-body">${body}</div>
+    </div>
+  `;
+
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(10px)";
+    toast.style.transition = "all 0.3s ease";
+    setTimeout(() => toast.remove(), 300);
+  }, 6000);
+}
+
+function initGoogleAuth() {
+  // Load Google Client ID from server or override
+  fetch("/api/auth/google/config")
+    .then(r => r.json())
+    .then(data => {
+      let cid = (data.ok && data.clientId) ? data.clientId : "";
+      if (authState.googleClientId) {
+        cid = authState.googleClientId;
+      }
+      if (cid && !cid.includes("YOUR_GOOGLE_CLIENT_ID_HERE")) {
+        authState.googleClientId = cid;
+        const inp = el("input-oauth-client-id");
+        if (inp) inp.value = cid;
+        setupGoogleGIS(cid);
+      }
+    })
+    .catch(() => {
+      if (authState.googleClientId && !authState.googleClientId.includes("YOUR_GOOGLE_CLIENT_ID_HERE")) {
+        setupGoogleGIS(authState.googleClientId);
+      }
+    });
+
+  const googleBtn = el("btn-google-signin");
+  if (googleBtn) {
+    googleBtn.addEventListener("click", handleGoogleButtonClick);
+  }
+
+  const toggleCfg = el("btn-toggle-oauth-config");
+  if (toggleCfg) {
+    toggleCfg.addEventListener("click", () => {
+      const drawer = el("oauth-config-drawer");
+      if (drawer) drawer.hidden = !drawer.hidden;
+    });
+  }
+
+  const saveCfg = el("btn-save-oauth-client-id");
+  if (saveCfg) {
+    saveCfg.addEventListener("click", async () => {
+      const val = (el("input-oauth-client-id").value || "").trim();
+      try {
+        const res = await fetch("/api/auth/google/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientId: val })
+        });
+        const data = await res.json();
+        const msg = el("oauth-config-msg");
+        if (msg) {
+          msg.hidden = false;
+          msg.textContent = "Google Client ID saved! " + (val ? "Initializing Google Sign-In..." : "");
+          msg.style.color = "#3fae94";
+        }
+        if (val) {
+          authState.googleClientId = val;
+          setupGoogleGIS(val);
+        }
+      } catch (e) {
+        alert("Failed to save: " + e.message);
+      }
+    });
+  }
+
+  // Google Account input & sign-in handler
+  const simCustom = el("btn-google-sim-custom-signin");
+  const simInput = el("input-google-sim-email");
+  const handleCustomGoogleSubmit = () => {
+    let raw = (el("input-google-sim-email").value || "").trim();
+    if (!raw) {
+      alert("Please enter your Google email address.");
+      return;
+    }
+    let email = raw;
+    if (!email.includes("@")) {
+      email = email.toLowerCase().replace(/[^a-z0-9.]/g, "") + "@gmail.com";
+    }
+    const username = email.split("@")[0].replace(/[._-]/g, " ");
+    const formattedName = username.replace(/\b\w/g, l => l.toUpperCase());
+
+    processGoogleUser({
+      name: formattedName,
+      email: email.toLowerCase(),
+      sub: "google-" + Math.abs(email.split("").reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a }, 0)),
+      picture: ""
+    });
+    el("modal-google-simulator").hidden = true;
+  };
+
+  if (simCustom) simCustom.addEventListener("click", handleCustomGoogleSubmit);
+  if (simInput) {
+    simInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleCustomGoogleSubmit();
+    });
+  }
+
+  const closeSim = el("btn-close-google-simulator");
+  if (closeSim) {
+    closeSim.addEventListener("click", () => {
+      el("modal-google-simulator").hidden = true;
+    });
+  }
+
+  // First-time Google onboarding modal completion
+  const btnGoogleComplete = el("btn-google-complete-signup");
+  if (btnGoogleComplete) {
+    btnGoogleComplete.addEventListener("click", finishGoogleSignup);
+  }
+
+  document.querySelectorAll("#google-role-picker .level-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#google-role-picker .level-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+    });
+  });
+}
+
+function setupGoogleGIS(clientId) {
+  if (window.google && google.accounts && google.accounts.id && clientId && !clientId.includes("YOUR_GOOGLE_CLIENT_ID_HERE")) {
+    try {
+      google.accounts.id.initialize({
+        client_id: clientId,
+        callback: handleGoogleCredentialResponse,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+
+      // Render official Google Sign-In button
+      const container = el("google-gsi-container");
+      if (container) {
+        container.innerHTML = "";
+        google.accounts.id.renderButton(container, {
+          theme: "outline",
+          size: "large",
+          text: "signin_with",
+          shape: "pill",
+          width: 320,
+          logo_alignment: "left"
+        });
+        container.style.display = "flex";
+        // Hide fallback button once official button is rendered
+        const fallbackBtn = el("btn-google-signin");
+        if (fallbackBtn) fallbackBtn.style.display = "none";
+      }
+    } catch (e) {
+      console.warn("GIS initialization warning:", e);
+    }
+  }
+}
+
+function handleGoogleButtonClick() {
+  if (window.google && google.accounts && google.accounts.id && authState.googleClientId && !authState.googleClientId.includes("YOUR_GOOGLE_CLIENT_ID_HERE")) {
+    try {
+      google.accounts.id.prompt((notification) => {
+        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+          el("modal-google-simulator").hidden = false;
+        }
+      });
+      return;
+    } catch (e) {
+      console.warn("Google prompt error, opening chooser:", e);
+    }
+  }
+  el("modal-google-simulator").hidden = false;
+}
+
+function handleGoogleCredentialResponse(response) {
+  try {
+    const payload = decodeJwtResponse(response.credential);
+    processGoogleUser({
+      name: payload.name || payload.email.split("@")[0],
+      email: payload.email,
+      sub: payload.sub,
+      picture: payload.picture || ""
+    });
+  } catch (e) {
+    showAuthToast("Google Sign-In Error", "Could not parse Google credential.", "error");
+  }
+}
+
+function decodeJwtResponse(token) {
+  const base64Url = token.split(".")[1];
+  const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+  const jsonPayload = decodeURIComponent(
+    atob(base64)
+      .split("")
+      .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+      .join("")
+  );
+  return JSON.parse(jsonPayload);
+}
+
+async function processGoogleUser(googleUser) {
+  try {
+    const res = await fetch("/api/auth/google", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(googleUser)
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      showAuthToast("Sign-In Failed", data.error || "Unable to sign in with Google", "error");
+      return;
+    }
+
+    if (!data.isNew && data.player) {
+      // User has logged in already! Log straight in
+      showAuthToast("Google Sign-In Successful", `Welcome back, ${data.player.name}!`, "success");
+      applyIdentity(data.player);
+      showScreen("wings");
+      refreshPlayerNameDatalist();
+      return;
+    }
+
+    // First time logging in with Google -> prompt to confirm role & finish signup
+    authState.pendingGoogleUser = data.googleUser || googleUser;
+    const modal = el("modal-google-onboarding");
+    el("google-onboard-name").textContent = authState.pendingGoogleUser.name;
+    el("google-onboard-email").textContent = authState.pendingGoogleUser.email;
+    const avatar = el("google-avatar-display");
+    if (authState.pendingGoogleUser.avatar) {
+      avatar.innerHTML = `<img src="${authState.pendingGoogleUser.avatar}" alt="Avatar">`;
+    } else {
+      avatar.textContent = (authState.pendingGoogleUser.name[0] || "G").toUpperCase();
+    }
+    modal.hidden = false;
+  } catch (e) {
+    showAuthToast("Network Error", e.message, "error");
+  }
+}
+
+async function finishGoogleSignup() {
+  if (!authState.pendingGoogleUser) return;
+  const roleBtn = document.querySelector("#google-role-picker .level-btn.active");
+  const role = (roleBtn && roleBtn.dataset.role) || "participant";
+
+  try {
+    const res = await fetch("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: authState.pendingGoogleUser.name,
+        email: authState.pendingGoogleUser.email,
+        role: role,
+        googleId: authState.pendingGoogleUser.googleId,
+        avatar: authState.pendingGoogleUser.avatar,
+        deviceToken: getDeviceToken()
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Could not save profile.");
+
+    el("modal-google-onboarding").hidden = true;
+    authState.pendingGoogleUser = null;
+    showAuthToast("Welcome to DaRI AI!", `Profile registered for ${data.player.name}.`, "success");
+    applyIdentity(data.player);
+    showScreen("wings");
+    refreshPlayerNameDatalist();
+  } catch (e) {
+    const err = el("google-onboard-error");
+    if (err) {
+      err.textContent = e.message;
+      err.hidden = false;
+    }
+  }
+}
+
 function resetIdentityScreen() {
-  el("input-identity-search").value = "";
-  el("input-identity-new-name").value = "";
-  el("identity-notice").hidden = true;
-  el("identity-error").hidden = true;
-  el("identity-create-error").hidden = true;
-  el("identity-takeover-block").hidden = true;
+  if (el("input-identity-search")) el("input-identity-search").value = "";
+  if (el("input-identity-new-name")) el("input-identity-new-name").value = "";
+  if (el("identity-notice")) el("identity-notice").hidden = true;
+  if (el("identity-error")) el("identity-error").hidden = true;
+  if (el("identity-create-error")) el("identity-create-error").hidden = true;
+  if (el("identity-takeover-block")) el("identity-takeover-block").hidden = true;
+  if (el("modal-google-onboarding")) el("modal-google-onboarding").hidden = true;
+  if (el("modal-google-simulator")) el("modal-google-simulator").hidden = true;
   document.querySelectorAll("#identity-role-picker .level-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.role === "participant");
   });
+  authState.pendingGoogleUser = null;
   pendingLoginId = null;
 }
 
@@ -493,20 +812,24 @@ let pendingLoginId = null;
 async function attemptIdentityLogin() {
   const errEl = el("identity-error");
   const noticeEl = el("identity-notice");
-  errEl.hidden = true;
-  noticeEl.hidden = true;
-  el("identity-takeover-block").hidden = true;
+  if (errEl) errEl.hidden = true;
+  if (noticeEl) noticeEl.hidden = true;
+  if (el("identity-takeover-block")) el("identity-takeover-block").hidden = true;
   const nameOrId = (el("input-identity-search").value || "").trim();
   if (!nameOrId) {
-    errEl.textContent = "Enter your name or player ID, or create a new profile below.";
-    errEl.hidden = false;
+    if (errEl) {
+      errEl.textContent = "Enter your name or player ID, or create a new profile below.";
+      errEl.hidden = false;
+    }
     return;
   }
   const player = await findExistingPlayerByNameOrId(nameOrId);
   if (!player) {
-    el("input-identity-new-name").value = nameOrId;
-    noticeEl.textContent = "No profile found with that name or ID — create one below.";
-    noticeEl.hidden = false;
+    if (el("input-identity-new-name")) el("input-identity-new-name").value = nameOrId;
+    if (noticeEl) {
+      noticeEl.textContent = "No profile found with that name or ID — create one below.";
+      noticeEl.hidden = false;
+    }
     return;
   }
   await loginAsPlayer(player.id, false);
@@ -523,15 +846,15 @@ async function findExistingPlayerByNameOrId(nameOrId) {
     const res = await fetch("/api/players");
     const data = await res.json();
     const key = trimmed.toLowerCase();
-    return (data.players || []).find((p) => (p.name || "").trim().toLowerCase() === key) || null;
+    return (data.players || []).find((p) => (p.name || "").trim().toLowerCase() === key || (p.email || "").trim().toLowerCase() === key) || null;
   } catch (e) {
     return null;
   }
 }
 
 async function loginAsPlayer(playerId, force) {
-  const errEl = el("identity-error");
-  errEl.hidden = true;
+  const errEl = el("identity-error") || el("login-error");
+  if (errEl) errEl.hidden = true;
   let data;
   try {
     const res = await fetch("/api/players/login", {
@@ -541,21 +864,25 @@ async function loginAsPlayer(playerId, force) {
     });
     data = await res.json();
   } catch (e) {
-    errEl.textContent = "Couldn't reach the server. Try again.";
-    errEl.hidden = false;
+    if (errEl) {
+      errEl.textContent = "Couldn't reach the server. Try again.";
+      errEl.hidden = false;
+    }
     return;
   }
   if (!data.ok) {
-    errEl.textContent = data.error || "Couldn't sign in.";
-    errEl.hidden = false;
+    if (errEl) {
+      errEl.textContent = data.error || "Couldn't sign in.";
+      errEl.hidden = false;
+    }
     return;
   }
   if (data.status === "locked") {
     pendingLoginId = playerId;
-    el("identity-takeover-block").hidden = false;
+    if (el("identity-takeover-block")) el("identity-takeover-block").hidden = false;
     return;
   }
-  el("identity-takeover-block").hidden = true;
+  if (el("identity-takeover-block")) el("identity-takeover-block").hidden = true;
   resetIdentityScreen();
   applyIdentity(data.player);
   showScreen("wings");
@@ -563,12 +890,14 @@ async function loginAsPlayer(playerId, force) {
 }
 
 async function createIdentity() {
-  const errEl = el("identity-create-error");
-  errEl.hidden = true;
+  const errEl = el("identity-create-error") || el("signup-error");
+  if (errEl) errEl.hidden = true;
   const name = (el("input-identity-new-name").value || "").trim();
   if (!name) {
-    errEl.textContent = "Enter a name for your profile.";
-    errEl.hidden = false;
+    if (errEl) {
+      errEl.textContent = "Enter a name for your profile.";
+      errEl.hidden = false;
+    }
     return;
   }
   const roleBtn = document.querySelector("#identity-role-picker .level-btn.active");
@@ -586,8 +915,10 @@ async function createIdentity() {
     showScreen("wings");
     refreshPlayerNameDatalist();
   } catch (e) {
-    errEl.textContent = e.message;
-    errEl.hidden = false;
+    if (errEl) {
+      errEl.textContent = e.message;
+      errEl.hidden = false;
+    }
   }
 }
 
@@ -606,18 +937,17 @@ async function switchPlayer() {
   }
   identity.id = null;
   identity.name = null;
+  identity.email = null;
   identity.role = null;
+  identity.avatar = null;
+  identity.authProvider = null;
   clearIdentityStorage();
   updateIdentityBadge();
   resetIdentityScreen();
   showScreen("identity");
 }
 
-// Tries to resume whoever was signed in on this device last time (if
-// anyone). Falls back to the identity picker whenever that doesn't pan
-// out - unknown/deleted profile, or the lock has since been taken by
-// another device without force (which surfaces here as status "locked",
-// since a page-load resume never passes force:true).
+// Resumes whoever was signed in on this device last time, or displays login screen.
 async function resumeIdentityOrPrompt() {
   const saved = loadIdentityFromStorage();
   if (saved && saved.id) {
@@ -628,14 +958,14 @@ async function resumeIdentityOrPrompt() {
         body: JSON.stringify({ id: saved.id, deviceToken: getDeviceToken(), force: false }),
       });
       const data = await res.json();
-      if (data.ok && data.status === "ok" && data.player) {
+      if (data.ok && (data.status === "ok" || !data.status) && data.player) {
         applyIdentity(data.player);
         showScreen("wings");
         refreshPlayerNameDatalist();
         return;
       }
     } catch (e) {
-      // fall through to the picker
+      // fall through to the login screen
     }
   }
   clearIdentityStorage();
@@ -1603,24 +1933,33 @@ async function init() {
     if (e.key === "Enter") joinByCode();
   });
 
-  el("btn-identity-continue").addEventListener("click", attemptIdentityLogin);
-  el("input-identity-search").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") attemptIdentityLogin();
-  });
-  el("btn-identity-takeover").addEventListener("click", () => {
-    if (pendingLoginId) loginAsPlayer(pendingLoginId, true);
-  });
-  el("btn-identity-create").addEventListener("click", createIdentity);
-  el("input-identity-new-name").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") createIdentity();
-  });
+  // Google OAuth Authentication
+  initGoogleAuth();
+
+  if (el("btn-identity-continue")) el("btn-identity-continue").addEventListener("click", attemptIdentityLogin);
+  if (el("input-identity-search")) {
+    el("input-identity-search").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") attemptIdentityLogin();
+    });
+  }
+  if (el("btn-identity-takeover")) {
+    el("btn-identity-takeover").addEventListener("click", () => {
+      if (pendingLoginId) loginAsPlayer(pendingLoginId, true);
+    });
+  }
+  if (el("btn-identity-create")) el("btn-identity-create").addEventListener("click", createIdentity);
+  if (el("input-identity-new-name")) {
+    el("input-identity-new-name").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") createIdentity();
+    });
+  }
   document.querySelectorAll("#identity-role-picker .level-btn").forEach((b) => {
     b.addEventListener("click", () => {
       document.querySelectorAll("#identity-role-picker .level-btn").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
     });
   });
-  el("btn-switch-player").addEventListener("click", switchPlayer);
+  if (el("btn-switch-player")) el("btn-switch-player").addEventListener("click", switchPlayer);
 
   initEmojiCharades();
   initCodeMirror();

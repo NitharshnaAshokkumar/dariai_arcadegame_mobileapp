@@ -16,6 +16,27 @@ const CONFIG_DIR = path.join(os.homedir(), '.pixel_mirror');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const PLAYERS_PATH = path.join(CONFIG_DIR, 'players.json');
 const TOURNAMENTS_PATH = path.join(CONFIG_DIR, 'tournaments.json');
+const verificationCodes = new Map(); // email -> { code, expires }
+
+// ============================================================================
+// GOOGLE OAUTH CONFIGURATION
+// You can paste your Google Cloud Console OAuth 2.0 Client ID below,
+// OR inside 'google-auth-config.json' in the project root folder.
+// ============================================================================
+const GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID_HERE.apps.googleusercontent.com";
+const GOOGLE_AUTH_CONFIG_FILE = path.join(__dirname, 'google-auth-config.json');
+
+function getGoogleClientId() {
+  if (GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.includes('YOUR_GOOGLE_CLIENT_ID_HERE')) {
+    return GOOGLE_CLIENT_ID.trim();
+  }
+  const fileCfg = readJsonFile(GOOGLE_AUTH_CONFIG_FILE, {});
+  if (fileCfg.client_id && !fileCfg.client_id.includes('YOUR_GOOGLE_CLIENT_ID_HERE')) {
+    return fileCfg.client_id.trim();
+  }
+  const userCfg = readJsonFile(CONFIG_PATH, {});
+  return (userCfg.google_client_id || process.env.GOOGLE_CLIENT_ID || '').trim();
+}
 
 function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
@@ -104,6 +125,153 @@ const server = http.createServer((req, res) => {
         delete cfg.openai_api_key;
         writeJsonFile(CONFIG_PATH, cfg);
         return sendJson({ ok: true });
+      }
+
+      // --- Authentication & Google OAuth Handlers ---
+      if (pathname === '/api/auth/google/config') {
+        if (req.method === 'GET') {
+          return sendJson({ ok: true, clientId: getGoogleClientId() });
+        }
+        if (req.method === 'POST') {
+          const cid = (body.clientId || '').trim();
+          const cfg = readJsonFile(CONFIG_PATH, {});
+          cfg.google_client_id = cid;
+          writeJsonFile(CONFIG_PATH, cfg);
+          try {
+            writeJsonFile(GOOGLE_AUTH_CONFIG_FILE, {
+              client_id: cid,
+              _instructions: "Replace client_id with your Google Cloud Console OAuth 2.0 Client ID."
+            });
+          } catch (e) {}
+          return sendJson({ ok: true, clientId: cid });
+        }
+      }
+
+      if (pathname === '/api/auth/check-email' && req.method === 'POST') {
+        const email = (body.email || '').trim().toLowerCase();
+        if (!email) return sendJson({ ok: false, error: 'Email is required' }, 400);
+        const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+        const player = Object.values(pdata.players || {}).find(p => (p.email || '').toLowerCase() === email);
+        return sendJson({ ok: true, exists: !!player, player: player || null });
+      }
+
+      if (pathname === '/api/auth/send-verification' && req.method === 'POST') {
+        const email = (body.email || '').trim().toLowerCase();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!email || !emailRegex.test(email)) {
+          return sendJson({ ok: false, error: 'Please enter a valid email address.' }, 400);
+        }
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        verificationCodes.set(email, { code, expires: Date.now() + 10 * 60 * 1000 });
+        return sendJson({
+          ok: true,
+          code: code,
+          message: `Verification code generated for ${email}`
+        });
+      }
+
+      if (pathname === '/api/auth/verify-code' && req.method === 'POST') {
+        const email = (body.email || '').trim().toLowerCase();
+        const code = (body.code || '').trim();
+        const record = verificationCodes.get(email);
+        if (!record) {
+          return sendJson({ ok: false, error: 'No verification code found. Please request a new code.' }, 400);
+        }
+        if (Date.now() > record.expires) {
+          verificationCodes.delete(email);
+          return sendJson({ ok: false, error: 'Verification code has expired. Please request a new code.' }, 400);
+        }
+        if (record.code !== code) {
+          return sendJson({ ok: false, error: 'Invalid verification code. Please check and try again.' }, 400);
+        }
+        return sendJson({ ok: true, verified: true });
+      }
+
+      if (pathname === '/api/auth/signup' && req.method === 'POST') {
+        const name = (body.name || '').trim();
+        const email = (body.email || '').trim().toLowerCase();
+        const role = body.role === 'admin' ? 'admin' : 'participant';
+        const googleId = body.googleId || null;
+        const avatar = body.avatar || null;
+
+        if (!name) return sendJson({ ok: false, error: 'Name is required.' }, 400);
+        if (!email) return sendJson({ ok: false, error: 'Email is required.' }, 400);
+
+        const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+        const existing = Object.values(pdata.players || {}).find(p => 
+          (p.email && p.email.toLowerCase() === email) || (googleId && p.googleId === googleId)
+        );
+        if (existing) {
+          return sendJson({ ok: false, error: 'An account with this email already exists. Please log in.', player: existing, exists: true }, 409);
+        }
+
+        const pid = 'P' + Math.floor(1000 + Math.random() * 9000);
+        const player = {
+          id: pid,
+          name,
+          email,
+          role,
+          googleId,
+          avatar,
+          emailVerified: true,
+          authProvider: googleId ? 'google' : 'email',
+          createdAt: Date.now() / 1000,
+          games: {}
+        };
+        pdata.players = pdata.players || {};
+        pdata.players[pid] = player;
+        writeJsonFile(PLAYERS_PATH, pdata);
+        return sendJson({ ok: true, player });
+      }
+
+      if (pathname === '/api/auth/login' && req.method === 'POST') {
+        const email = (body.email || '').trim().toLowerCase();
+        const pid = (body.id || '').trim().toUpperCase();
+        const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+        let player = null;
+        if (email) {
+          player = Object.values(pdata.players || {}).find(p => (p.email || '').toLowerCase() === email);
+        }
+        if (!player && pid) {
+          player = pdata.players[pid] || Object.values(pdata.players || {}).find(p => (p.name || '').toLowerCase() === pid.toLowerCase());
+        }
+        if (!player) {
+          return sendJson({ ok: false, notFound: true, error: 'No account found. Please sign up first.' }, 404);
+        }
+        return sendJson({ ok: true, player });
+      }
+
+      if (pathname === '/api/auth/google' && req.method === 'POST') {
+        const { email, name, picture, sub } = body;
+        const cleanEmail = (email || '').trim().toLowerCase();
+        if (!cleanEmail) {
+          return sendJson({ ok: false, error: 'Google account email missing.' }, 400);
+        }
+        const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+        let player = Object.values(pdata.players || {}).find(p => 
+          (p.googleId && p.googleId === sub) || (p.email && p.email.toLowerCase() === cleanEmail)
+        );
+
+        if (player) {
+          if (!player.googleId && sub) {
+            player.googleId = sub;
+          }
+          if (picture && !player.avatar) player.avatar = picture;
+          writeJsonFile(PLAYERS_PATH, pdata);
+          return sendJson({ ok: true, isNew: false, player });
+        }
+
+        // Return user data so frontend can ask user to complete signup or auto-provision
+        return sendJson({
+          ok: true,
+          isNew: true,
+          googleUser: {
+            name: name || cleanEmail.split('@')[0],
+            email: cleanEmail,
+            googleId: sub || 'G-' + Date.now(),
+            avatar: picture || ''
+          }
+        });
       }
 
       if (pathname === '/api/players' && req.method === 'GET') {

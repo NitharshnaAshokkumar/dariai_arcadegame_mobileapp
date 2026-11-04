@@ -10,6 +10,8 @@
 <link rel="icon" type="image/png" href="img/favicon.png">
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="style.css">
+<!-- Google Identity Services for Google OAuth Sign-In -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -49,46 +51,133 @@
     </div>
   </section>
 
-  <!-- IDENTITY: who's playing on this device - asked once, then this
-       device stays signed in as that player (shown in the header) until
-       someone explicitly switches players. -->
+  <!-- AUTHENTICATION & LOGIN SCREEN: STRICTLY GOOGLE OAUTH -->
   <section id="screen-identity" class="screen">
-    <div class="card narrow">
-      <h1>Who's playing?</h1>
-      <p class="muted">Pick your player profile, or create a new one below. This device stays signed in as you &mdash; your name shows at the top of the screen &mdash; until you switch players.</p>
-
-      <label for="input-identity-search">Your name or player ID</label>
-      <input id="input-identity-search" type="text" list="player-name-list" placeholder="e.g. Alex, or a player ID like 27H9X" autocomplete="off">
-      <button id="btn-identity-continue" class="btn-primary" type="button">Continue</button>
-      <p id="identity-notice" class="hint" hidden></p>
-      <p id="identity-error" class="error" hidden></p>
-
-      <div id="identity-takeover-block" hidden>
-        <p class="hint">That player looks like they're already active on another device right now. Continuing here will sign them out there.</p>
-        <button id="btn-identity-takeover" class="btn-secondary" type="button">Continue anyway (sign out the other device)</button>
+    <div class="card auth-card google-only-card">
+      <div class="auth-header">
+        <img src="img/dari-logo-icon.png" alt="DaRI AI" class="auth-logo">
+        <h1 class="auth-title">DaRI AI Arcade</h1>
+        <p class="muted auth-subtitle">Sign in with your Google account to access solo arcade challenges, live tournaments, and player leaderboards.</p>
       </div>
 
-      <div class="tournament-join-block">
-        <p class="hint">New here? Create your own profile:</p>
-        <label for="input-identity-new-name">Your name</label>
-        <input id="input-identity-new-name" type="text" placeholder="e.g. Alex" autocomplete="off">
+      <!-- Google OAuth Sign In Box -->
+      <div class="google-auth-box">
+        <div id="google-gsi-container" class="gsi-container"></div>
 
-        <label>Your role</label>
-        <div class="level-picker" id="identity-role-picker">
-          <button type="button" class="level-btn active" data-role="participant">
-            <span class="level-num">Dari Participant</span>
-            <span class="level-tag">Play solo &amp; join tournaments</span>
-          </button>
-          <button type="button" class="level-btn" data-role="admin">
-            <span class="level-num">Dari Admin</span>
-            <span class="level-tag">Can also set up tournaments</span>
-          </button>
+        <button id="btn-google-signin" class="btn-google btn-google-hero" type="button">
+          <svg class="google-icon" viewBox="0 0 24 24" width="22" height="22">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          <span class="btn-google-text">Sign in with Google</span>
+        </button>
+
+        <p class="google-auth-caption">
+          <span class="auth-lock-icon">🔒</span>
+          <span>Secured via Google OAuth 2.0. Any Google or Gmail account can sign in instantly.</span>
+        </p>
+
+        <div class="auth-config-row">
+          <button id="btn-toggle-oauth-config" class="link-btn-subtle" type="button">⚙️ Google OAuth Client ID Configuration</button>
         </div>
-        <button id="btn-identity-create" class="btn-primary" type="button">Create profile &amp; continue</button>
-        <p id="identity-create-error" class="error" hidden></p>
+
+        <div id="oauth-config-drawer" class="oauth-config-drawer" hidden>
+          <p class="hint">You can set your Google Client ID in <strong>google-auth-config.json</strong>, or paste it here:</p>
+          <input id="input-oauth-client-id" type="text" placeholder="123456789-abc.apps.googleusercontent.com" autocomplete="off">
+          <button id="btn-save-oauth-client-id" class="btn-secondary" type="button">Save Client ID</button>
+          <p id="oauth-config-msg" class="hint" hidden></p>
+        </div>
+      </div>
+
+      <!-- Hidden legacy compatibility fields so external scripts won't break -->
+      <div style="display:none;" aria-hidden="true">
+        <input id="input-identity-search" type="text">
+        <button id="btn-identity-continue" type="button"></button>
+        <p id="identity-notice"></p>
+        <p id="identity-error"></p>
+        <div id="identity-takeover-block">
+          <button id="btn-identity-takeover" type="button"></button>
+        </div>
+        <input id="input-identity-new-name" type="text">
+        <div id="identity-role-picker">
+          <button type="button" class="level-btn active" data-role="participant"></button>
+          <button type="button" class="level-btn" data-role="admin"></button>
+        </div>
+        <button id="btn-identity-create" type="button"></button>
+        <p id="identity-create-error"></p>
+        <input id="input-login-email" type="text">
+        <button id="btn-login-submit" type="button"></button>
       </div>
     </div>
   </section>
+
+  <!-- MODAL: First-Time Google OAuth Profile Setup -->
+  <div id="modal-google-onboarding" class="auth-modal-backdrop" hidden>
+    <div class="auth-modal-card">
+      <div class="auth-modal-header">
+        <span class="google-badge-pill">Google Sign-In</span>
+        <h2>Welcome to DaRI AI Arcade!</h2>
+        <p class="muted">You're signing in with Google for the first time. Confirm your role to complete setup:</p>
+      </div>
+
+      <div class="google-user-summary">
+        <div id="google-avatar-display" class="google-avatar-img">G</div>
+        <div class="google-user-details">
+          <div id="google-onboard-name" class="google-user-name">User Name</div>
+          <div class="google-verified-tag">
+            <span>✓ Verified Google Account:</span>
+            <span id="google-onboard-email">user@gmail.com</span>
+          </div>
+        </div>
+      </div>
+
+      <label>Select Your DaRI Role</label>
+      <div class="level-picker" id="google-role-picker">
+        <button type="button" class="level-btn active" data-role="participant">
+          <span class="level-num">Dari Participant</span>
+          <span class="level-tag">Play solo challenges &amp; join tournaments</span>
+        </button>
+        <button type="button" class="level-btn" data-role="admin">
+          <span class="level-num">Dari Admin</span>
+          <span class="level-tag">Can also host &amp; manage tournaments</span>
+        </button>
+      </div>
+
+      <button id="btn-google-complete-signup" class="btn-primary btn-block" type="button">Confirm &amp; Enter Arcade</button>
+      <p id="google-onboard-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <!-- MODAL: Google OAuth Account Chooser (Interactive Simulator & Standalone Fallback) -->
+  <div id="modal-google-simulator" class="auth-modal-backdrop" hidden>
+    <div class="auth-modal-card google-chooser-card">
+      <div class="google-chooser-top">
+        <svg class="google-icon" viewBox="0 0 24 24" width="28" height="28">
+          <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+          <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+          <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+          <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+        </svg>
+        <h3>Sign in with Google</h3>
+        <p class="muted">Enter your Google or institutional account to continue to <strong>DaRI AI Arcade</strong></p>
+      </div>
+
+      <div class="google-custom-acc-section">
+        <label for="input-google-sim-email">Google Email Address:</label>
+        <input id="input-google-sim-email" type="email" placeholder="e.g. 23pw17@psgtech.ac.in or name@gmail.com" autocomplete="email" autofocus>
+        <button id="btn-google-sim-custom-signin" class="btn-primary btn-block" type="button">Sign In with Google</button>
+      </div>
+
+      <div class="google-chooser-footer">
+        <button id="btn-close-google-simulator" class="link-btn" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="auth-toast-container" class="auth-toast-container"></div>
 
   <!-- HOME SCREEN — Day 2 Requirement: Main screen users see when opening the app -->
   <section id="screen-wings" class="screen">

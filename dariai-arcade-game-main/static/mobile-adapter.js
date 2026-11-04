@@ -16,6 +16,9 @@
   const STORAGE_KEY_PLAYERS = "dariai_players_data";
   const STORAGE_KEY_TOURNAMENTS = "dariai_tournaments_data";
   const STORAGE_KEY_SERVER_URL = "dariai_server_url";
+  const STORAGE_KEY_GOOGLE_CLIENT_ID = "dariai_google_client_id";
+
+  const localVerificationCodes = new Map(); // email -> { code, expires }
 
   const defaultPlayersData = {
     statsSchemaVersion: 2,
@@ -157,6 +160,141 @@
     if (url === "/api/key/clear") {
       localStorage.removeItem(STORAGE_KEY_API_KEY);
       return createJsonResponse({ ok: true });
+    }
+
+    // --- Authentication & Google OAuth Handlers (Offline / Standalone Adapter) ---
+    if (url === "/api/auth/google/config") {
+      if (method === "GET") {
+        return createJsonResponse({ ok: true, clientId: localStorage.getItem(STORAGE_KEY_GOOGLE_CLIENT_ID) || "" });
+      }
+      if (method === "POST") {
+        const cid = (body.clientId || "").trim();
+        localStorage.setItem(STORAGE_KEY_GOOGLE_CLIENT_ID, cid);
+        return createJsonResponse({ ok: true, clientId: cid });
+      }
+    }
+
+    if (url === "/api/auth/check-email" && method === "POST") {
+      const email = (body.email || "").trim().toLowerCase();
+      if (!email) return createJsonResponse({ ok: false, error: "Email is required" }, 400);
+      const data = getLocalPlayers();
+      const player = Object.values(data.players || {}).find(p => (p.email || "").toLowerCase() === email);
+      return createJsonResponse({ ok: true, exists: !!player, player: player || null });
+    }
+
+    if (url === "/api/auth/send-verification" && method === "POST") {
+      const email = (body.email || "").trim().toLowerCase();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!email || !emailRegex.test(email)) {
+        return createJsonResponse({ ok: false, error: "Please enter a valid email address." }, 400);
+      }
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      localVerificationCodes.set(email, { code, expires: Date.now() + 10 * 60 * 1000 });
+      return createJsonResponse({
+        ok: true,
+        code: code,
+        message: `Verification code generated for ${email}`
+      });
+    }
+
+    if (url === "/api/auth/verify-code" && method === "POST") {
+      const email = (body.email || "").trim().toLowerCase();
+      const code = (body.code || "").trim();
+      const record = localVerificationCodes.get(email);
+      if (!record) {
+        return createJsonResponse({ ok: false, error: "No verification code found. Please request a new code." }, 400);
+      }
+      if (Date.now() > record.expires) {
+        localVerificationCodes.delete(email);
+        return createJsonResponse({ ok: false, error: "Verification code has expired. Please request a new code." }, 400);
+      }
+      if (record.code !== code) {
+        return createJsonResponse({ ok: false, error: "Invalid verification code. Please check and try again." }, 400);
+      }
+      return createJsonResponse({ ok: true, verified: true });
+    }
+
+    if (url === "/api/auth/signup" && method === "POST") {
+      const name = (body.name || "").trim();
+      const email = (body.email || "").trim().toLowerCase();
+      const role = (body.role || "participant").trim().toLowerCase();
+      const googleId = body.googleId || null;
+      const avatar = body.avatar || null;
+
+      if (!name) return createJsonResponse({ ok: false, error: "Name is required." }, 400);
+      if (!email) return createJsonResponse({ ok: false, error: "Email is required." }, 400);
+
+      const data = getLocalPlayers();
+      const existing = Object.values(data.players || {}).find(p => 
+        (p.email && p.email.toLowerCase() === email) || (googleId && p.googleId === googleId)
+      );
+      if (existing) {
+        return createJsonResponse({ ok: false, error: "An account with this email already exists. Please log in.", player: existing, exists: true }, 409);
+      }
+
+      const newId = generatePlayerId(Object.keys(data.players));
+      const player = {
+        id: newId,
+        name,
+        email,
+        role: role === "admin" ? "admin" : "participant",
+        googleId,
+        avatar,
+        emailVerified: true,
+        authProvider: googleId ? "google" : "email",
+        createdAt: Date.now() / 1000,
+        games: {}
+      };
+      data.players[newId] = player;
+      saveLocalPlayers(data);
+      return createJsonResponse({ ok: true, player });
+    }
+
+    if (url === "/api/auth/login" && method === "POST") {
+      const email = (body.email || "").trim().toLowerCase();
+      const pid = (body.id || "").trim().toUpperCase();
+      const data = getLocalPlayers();
+      let player = null;
+      if (email) {
+        player = Object.values(data.players || {}).find(p => (p.email || "").toLowerCase() === email);
+      }
+      if (!player && pid) {
+        player = data.players[pid] || Object.values(data.players || {}).find(p => (p.name || "").toLowerCase() === pid.toLowerCase());
+      }
+      if (!player) {
+        return createJsonResponse({ ok: false, notFound: true, error: "No account found. Please sign up first." }, 404);
+      }
+      return createJsonResponse({ ok: true, player });
+    }
+
+    if (url === "/api/auth/google" && method === "POST") {
+      const { email, name, picture, sub } = body;
+      const cleanEmail = (email || "").trim().toLowerCase();
+      if (!cleanEmail) {
+        return createJsonResponse({ ok: false, error: "Google account email missing." }, 400);
+      }
+      const data = getLocalPlayers();
+      let player = Object.values(data.players || {}).find(p => 
+        (p.googleId && p.googleId === sub) || (p.email && p.email.toLowerCase() === cleanEmail)
+      );
+
+      if (player) {
+        if (!player.googleId && sub) player.googleId = sub;
+        if (picture && !player.avatar) player.avatar = picture;
+        saveLocalPlayers(data);
+        return createJsonResponse({ ok: true, isNew: false, player });
+      }
+
+      return createJsonResponse({
+        ok: true,
+        isNew: true,
+        googleUser: {
+          name: name || cleanEmail.split("@")[0],
+          email: cleanEmail,
+          googleId: sub || "G-" + Date.now(),
+          avatar: picture || ""
+        }
+      });
     }
 
     // 2. /api/players
