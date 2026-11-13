@@ -392,6 +392,22 @@
       return createJsonResponse({ ok: true, player: p });
     }
 
+    if (url === "/api/players/role" && method === "POST") {
+      const pid = (body.id || "").trim().toUpperCase();
+      const role = body.role === "admin" ? "admin" : "participant";
+      if (role === "admin" && body.password !== "1234") {
+        return createJsonResponse({ ok: false, error: "Incorrect admin password." }, 403);
+      }
+      const data = getLocalPlayers();
+      const p = data.players[pid];
+      if (p) {
+        p.role = role;
+        saveLocalPlayers(data);
+        return createJsonResponse({ ok: true, player: p });
+      }
+      return createJsonResponse({ ok: false, error: "Player not found." }, 404);
+    }
+
     if (url === "/api/players/logout" && method === "POST") {
       return createJsonResponse({ ok: true });
     }

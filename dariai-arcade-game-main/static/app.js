@@ -1032,22 +1032,135 @@ async function resumeIdentityOrPrompt() {
   showScreen("identity");
 }
 
-// After successful authentication, check for API key then proceed.
-async function proceedAfterAuth() {
-  try {
-    const res = await fetch("/api/key");
-    const data = await res.json();
-    if (data.has_key && data.api_key) {
-      state.apiKey = data.api_key;
-      showScreen("wings");
+// After successful authentication, present the centered role selection screen
+function proceedAfterAuth() {
+  const avatarEl = el("role-select-avatar");
+  const nameEl = el("role-select-name");
+  const emailEl = el("role-select-email");
+  if (nameEl) nameEl.textContent = identity.name || "Player";
+  if (emailEl) emailEl.textContent = identity.email || "Verified Google Account";
+  if (avatarEl) {
+    if (identity.avatar) {
+      avatarEl.innerHTML = `<img src="${identity.avatar}" alt="Avatar">`;
     } else {
-      showScreen("setup");
+      avatarEl.textContent = ((identity.name || "G")[0]).toUpperCase();
     }
-  } catch (e) {
-    showScreen("setup");
   }
+
+  // Reset password field and error
+  const pwdInput = el("input-admin-mode-password");
+  if (pwdInput) pwdInput.value = "";
+  const errEl = el("admin-password-error");
+  if (errEl) errEl.hidden = true;
+
+  // Default to Participant
+  document.querySelectorAll("#mode-role-picker .level-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.role === "participant");
+  });
+  const pwdBlock = el("admin-password-block");
+  if (pwdBlock) pwdBlock.style.display = "none";
+
+  showScreen("role-select");
 }
 const loadApiKeyThenProceed = proceedAfterAuth;
+
+function initRoleSelection() {
+  document.querySelectorAll("#mode-role-picker .level-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#mode-role-picker .level-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      const role = b.dataset.role;
+      const pwdBlock = el("admin-password-block");
+      const errEl = el("admin-password-error");
+      if (errEl) errEl.hidden = true;
+      if (pwdBlock) {
+        if (role === "admin") {
+          pwdBlock.style.display = "block";
+          const inp = el("input-admin-mode-password");
+          if (inp) inp.focus();
+        } else {
+          pwdBlock.style.display = "none";
+        }
+      }
+    });
+  });
+
+  const confirmBtn = el("btn-confirm-role-mode");
+  if (confirmBtn) {
+    confirmBtn.addEventListener("click", handleRoleSelectionConfirm);
+  }
+
+  const pwdInput = el("input-admin-mode-password");
+  if (pwdInput) {
+    pwdInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleRoleSelectionConfirm();
+    });
+  }
+}
+
+async function handleRoleSelectionConfirm() {
+  const activeRoleBtn = document.querySelector("#mode-role-picker .level-btn.active");
+  const chosenRole = (activeRoleBtn && activeRoleBtn.dataset.role) || "participant";
+  const pwdInput = el("input-admin-mode-password");
+  const errEl = el("admin-password-error");
+  if (errEl) errEl.hidden = true;
+
+  if (chosenRole === "admin") {
+    const pwd = (pwdInput ? pwdInput.value : "").trim();
+    if (!pwd) {
+      if (errEl) {
+        errEl.textContent = "Please enter the admin password.";
+        errEl.hidden = false;
+      }
+      if (pwdInput) pwdInput.focus();
+      return;
+    }
+    // As requested: keep as 1234 for now, later fetched from backend
+    if (pwd !== "1234") {
+      if (errEl) {
+        errEl.textContent = "Incorrect admin password. Please try again.";
+        errEl.hidden = false;
+      }
+      if (pwdInput) pwdInput.focus();
+      return;
+    }
+
+    identity.role = "admin";
+    updateIdentityBadge();
+    applyAdminGating();
+    saveIdentityToStorage();
+
+    if (identity.id) {
+      fetch("/api/players/role", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: identity.id, role: "admin", password: pwd })
+      }).catch(() => {});
+    }
+
+    showAuthToast("Admin Verified", "Password verified. Opening OpenAI API Key configuration.", "success");
+    // Show the API key screen as requested
+    showScreen("setup");
+    return;
+  }
+
+  // Chosen role is participant -> directly launch gaming screen
+  identity.role = "participant";
+  updateIdentityBadge();
+  applyAdminGating();
+  saveIdentityToStorage();
+
+  if (identity.id) {
+    fetch("/api/players/role", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: identity.id, role: "participant" })
+    }).catch(() => {});
+  }
+
+  showAuthToast("Welcome, Participant!", "Directly entering DaRI AI Arcade...", "success");
+  showScreen("wings");
+}
 
 // Tournament mode state - separate from the solo-play state above.
 // A tournament is a random single-elimination knockout bracket. Each match
@@ -1108,7 +1221,7 @@ function showScreen(name) {
   document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
   const target = el("screen-" + name);
   if (target) target.classList.add("active");
-  el("btn-change-key").hidden = name === "setup" || name === "identity";
+  el("btn-change-key").hidden = name === "setup" || name === "identity" || name === "role-select" || identity.role !== "admin";
 
   // Update bottom navigation bar active state
   document.querySelectorAll(".bottom-nav-item").forEach((btn) => {
@@ -2041,6 +2154,7 @@ async function init() {
   initCodeMirror();
   initPromptRepair();
   initVoiceInput();
+  initRoleSelection();
 
   // Check if returning from Google OAuth redirect flow with tokens
   const handledOAuth = await checkOAuthRedirectParams();

@@ -519,6 +519,26 @@ const server = http.createServer(async (req, res) => {
         return sendJson({ ok: true, player: p });
       }
 
+      if (pathname === '/api/players/role' && req.method === 'POST') {
+        const pid = (body.id || '').trim().toUpperCase();
+        const role = body.role === 'admin' ? 'admin' : 'participant';
+        const password = body.password || '';
+        if (role === 'admin') {
+          const adminPassword = process.env.ADMIN_PASSWORD || '1234';
+          if (password !== adminPassword) {
+            return sendJson({ ok: false, error: 'Incorrect admin password.' }, 403);
+          }
+        }
+        const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+        const p = pdata.players[pid];
+        if (p) {
+          p.role = role;
+          writeJsonFile(PLAYERS_PATH, pdata);
+          return sendJson({ ok: true, player: p });
+        }
+        return sendJson({ ok: false, error: 'Player not found.' }, 404);
+      }
+
       if (pathname === '/api/players/logout') {
         return sendJson({ ok: true });
       }
