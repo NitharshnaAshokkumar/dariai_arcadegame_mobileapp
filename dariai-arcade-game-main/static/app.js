@@ -524,25 +524,26 @@ function showAuthToast(title, body, type = "info") {
   }, 6000);
 }
 
-function checkOAuthRedirectParams() {
+async function checkOAuthRedirectParams() {
   const params = new URLSearchParams(window.location.search);
   if (params.has("auth_player")) {
     try {
       const player = JSON.parse(decodeURIComponent(params.get("auth_player")));
       applyIdentity(player);
       showAuthToast("Google Sign-In Successful", `Welcome back, ${player.name}!`, "success");
-      showScreen("wings");
+      await proceedAfterAuth();
       refreshPlayerNameDatalist();
     } catch (e) {
       console.error("Could not parse auth_player:", e);
     }
     window.history.replaceState({}, document.title, window.location.pathname);
-    return;
+    return true;
   }
   if (params.has("auth_new_google")) {
     try {
       const pending = JSON.parse(decodeURIComponent(params.get("auth_new_google")));
       authState.pendingGoogleUser = pending;
+      showScreen("identity");
       const modal = el("modal-google-onboarding");
       if (modal) {
         el("google-onboard-name").textContent = pending.name;
@@ -561,20 +562,18 @@ function checkOAuthRedirectParams() {
       console.error("Could not parse auth_new_google:", e);
     }
     window.history.replaceState({}, document.title, window.location.pathname);
-    return;
+    return true;
   }
   if (params.has("auth_error")) {
     const err = decodeURIComponent(params.get("auth_error"));
     showAuthToast("Google Authentication Failed", err, "error");
     window.history.replaceState({}, document.title, window.location.pathname);
-    return;
+    return false;
   }
+  return false;
 }
 
 function initGoogleAuth() {
-  // Check if returning from Google OAuth redirect flow
-  checkOAuthRedirectParams();
-
   // Load Google Client ID from server or override
   fetch("/api/auth/google/config")
     .then(r => r.json())
@@ -738,7 +737,7 @@ async function handleGoogleCredentialResponse(response) {
     if (!data.isNew && data.player) {
       applyIdentity(data.player);
       showAuthToast("Google Sign-In Successful", `Welcome back, ${data.player.name}!`, "success");
-      showScreen("wings");
+      await proceedAfterAuth();
       refreshPlayerNameDatalist();
       return;
     }
@@ -840,7 +839,7 @@ async function finishGoogleSignup() {
     authState.pendingGoogleUser = null;
     showAuthToast("Welcome to DaRI AI!", `Profile registered for ${data.player.name}.`, "success");
     applyIdentity(data.player);
-    showScreen("wings");
+    await proceedAfterAuth();
     refreshPlayerNameDatalist();
   } catch (e) {
     const err = el("google-onboard-error");
@@ -945,7 +944,7 @@ async function loginAsPlayer(playerId, force) {
   if (el("identity-takeover-block")) el("identity-takeover-block").hidden = true;
   resetIdentityScreen();
   applyIdentity(data.player);
-  showScreen("wings");
+  await proceedAfterAuth();
   refreshPlayerNameDatalist();
 }
 
@@ -972,7 +971,7 @@ async function createIdentity() {
     if (!data.ok) throw new Error(data.error || "Could not create profile.");
     resetIdentityScreen();
     applyIdentity(data.player);
-    showScreen("wings");
+    await proceedAfterAuth();
     refreshPlayerNameDatalist();
   } catch (e) {
     if (errEl) {
@@ -1020,7 +1019,7 @@ async function resumeIdentityOrPrompt() {
       const data = await res.json();
       if (data.ok && (data.status === "ok" || !data.status) && data.player) {
         applyIdentity(data.player);
-        showScreen("wings");
+        await proceedAfterAuth();
         refreshPlayerNameDatalist();
         return;
       }
@@ -1032,6 +1031,23 @@ async function resumeIdentityOrPrompt() {
   resetIdentityScreen();
   showScreen("identity");
 }
+
+// After successful authentication, check for API key then proceed.
+async function proceedAfterAuth() {
+  try {
+    const res = await fetch("/api/key");
+    const data = await res.json();
+    if (data.has_key && data.api_key) {
+      state.apiKey = data.api_key;
+      showScreen("wings");
+    } else {
+      showScreen("setup");
+    }
+  } catch (e) {
+    showScreen("setup");
+  }
+}
+const loadApiKeyThenProceed = proceedAfterAuth;
 
 // Tournament mode state - separate from the solo-play state above.
 // A tournament is a random single-elimination knockout bracket. Each match
@@ -1083,11 +1099,11 @@ function renderTournamentLevelPicker() {
 const el = (id) => document.getElementById(id);
 
 function showScreen(name) {
-  // Any screen change cancels whatever server-polling loop was running for
-  // a tournament screen (see startPolling/stopPolling) - a screen that
-  // needs polling starts its own right back up immediately after calling
-  // this, so nothing keeps refreshing in the background once you've
-  // navigated away from it.
+  // If user is already authenticated, disable/block showing the identity login screen
+  if (name === "identity" && identity.id) {
+    proceedAfterAuth();
+    return;
+  }
   stopPolling();
   document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
   const target = el("screen-" + name);
@@ -2026,17 +2042,11 @@ async function init() {
   initPromptRepair();
   initVoiceInput();
 
-  try {
-    const res = await fetch("/api/key");
-    const data = await res.json();
-    if (data.has_key) {
-      state.apiKey = data.api_key;
-      await resumeIdentityOrPrompt();
-    } else {
-      showScreen("setup");
-    }
-  } catch (e) {
-    showScreen("setup");
+  // Check if returning from Google OAuth redirect flow with tokens
+  const handledOAuth = await checkOAuthRedirectParams();
+  if (!handledOAuth) {
+    // If not returning from OAuth redirect, check saved session or prompt Google login
+    await resumeIdentityOrPrompt();
   }
 }
 
@@ -2058,7 +2068,7 @@ async function saveApiKey() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Could not save key");
     state.apiKey = key;
-    await resumeIdentityOrPrompt();
+    showScreen("wings");
   } catch (e) {
     errEl.textContent = "Could not save your key: " + e.message;
     errEl.hidden = false;
