@@ -174,6 +174,39 @@
       }
     }
 
+    if (url === "/api/auth/google/verify-token" && method === "POST") {
+      const { credential } = body;
+      if (!credential) return createJsonResponse({ ok: false, error: "Google credential missing." }, 400);
+      try {
+        const base64Url = credential.split(".")[1];
+        const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+        const payload = JSON.parse(decodeURIComponent(atob(base64).split("").map(c => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)).join("")));
+        const cleanEmail = (payload.email || "").trim().toLowerCase();
+        const data = getLocalPlayers();
+        let player = Object.values(data.players || {}).find(p =>
+          (p.googleId && p.googleId === payload.sub) || (p.email && p.email.toLowerCase() === cleanEmail)
+        );
+        if (player) {
+          player.emailVerified = true;
+          if (payload.picture && !player.avatar) player.avatar = payload.picture;
+          saveLocalPlayers(data);
+          return createJsonResponse({ ok: true, isNew: false, player });
+        }
+        return createJsonResponse({
+          ok: true,
+          isNew: true,
+          googleUser: {
+            name: payload.name || cleanEmail.split("@")[0],
+            email: cleanEmail,
+            googleId: payload.sub,
+            avatar: payload.picture || ""
+          }
+        });
+      } catch (e) {
+        return createJsonResponse({ ok: false, error: "Could not parse Google token" }, 400);
+      }
+    }
+
     if (url === "/api/auth/check-email" && method === "POST") {
       const email = (body.email || "").trim().toLowerCase();
       if (!email) return createJsonResponse({ ok: false, error: "Email is required" }, 400);

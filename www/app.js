@@ -1,9 +1,8 @@
 // ============================================================================
 // GOOGLE OAUTH CONFIGURATION
-// You can paste your Google Cloud Console OAuth 2.0 Web Client ID below,
-// OR inside 'google-auth-config.json' in the project root folder.
+// Client ID is dynamically fetched from /api/auth/google/config (backed by .env)
 // ============================================================================
-const GOOGLE_CLIENT_ID_OVERRIDE = "YOUR_GOOGLE_CLIENT_ID_HERE.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID_OVERRIDE = "";
 
 // Prompt Mirror - client-side game logic.
 // All OpenAI calls are made directly from this browser tab, using the
@@ -525,7 +524,57 @@ function showAuthToast(title, body, type = "info") {
   }, 6000);
 }
 
+function checkOAuthRedirectParams() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("auth_player")) {
+    try {
+      const player = JSON.parse(decodeURIComponent(params.get("auth_player")));
+      applyIdentity(player);
+      showAuthToast("Google Sign-In Successful", `Welcome back, ${player.name}!`, "success");
+      showScreen("wings");
+      refreshPlayerNameDatalist();
+    } catch (e) {
+      console.error("Could not parse auth_player:", e);
+    }
+    window.history.replaceState({}, document.title, window.location.pathname);
+    return;
+  }
+  if (params.has("auth_new_google")) {
+    try {
+      const pending = JSON.parse(decodeURIComponent(params.get("auth_new_google")));
+      authState.pendingGoogleUser = pending;
+      const modal = el("modal-google-onboarding");
+      if (modal) {
+        el("google-onboard-name").textContent = pending.name;
+        el("google-onboard-email").textContent = pending.email;
+        const avatar = el("google-avatar-display");
+        if (avatar) {
+          if (pending.avatar) {
+            avatar.innerHTML = `<img src="${pending.avatar}" alt="Avatar">`;
+          } else {
+            avatar.textContent = (pending.name[0] || "G").toUpperCase();
+          }
+        }
+        modal.hidden = false;
+      }
+    } catch (e) {
+      console.error("Could not parse auth_new_google:", e);
+    }
+    window.history.replaceState({}, document.title, window.location.pathname);
+    return;
+  }
+  if (params.has("auth_error")) {
+    const err = decodeURIComponent(params.get("auth_error"));
+    showAuthToast("Google Authentication Failed", err, "error");
+    window.history.replaceState({}, document.title, window.location.pathname);
+    return;
+  }
+}
+
 function initGoogleAuth() {
+  // Check if returning from Google OAuth redirect flow
+  checkOAuthRedirectParams();
+
   // Load Google Client ID from server or override
   fetch("/api/auth/google/config")
     .then(r => r.json())
@@ -587,29 +636,12 @@ function initGoogleAuth() {
     });
   }
 
-  // Google Account input & sign-in handler
+  // Google Account sign-in trigger
   const simCustom = el("btn-google-sim-custom-signin");
   const simInput = el("input-google-sim-email");
   const handleCustomGoogleSubmit = () => {
-    let raw = (el("input-google-sim-email").value || "").trim();
-    if (!raw) {
-      alert("Please enter your Google email address.");
-      return;
-    }
-    let email = raw;
-    if (!email.includes("@")) {
-      email = email.toLowerCase().replace(/[^a-z0-9.]/g, "") + "@gmail.com";
-    }
-    const username = email.split("@")[0].replace(/[._-]/g, " ");
-    const formattedName = username.replace(/\b\w/g, l => l.toUpperCase());
-
-    processGoogleUser({
-      name: formattedName,
-      email: email.toLowerCase(),
-      sub: "google-" + Math.abs(email.split("").reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a }, 0)),
-      picture: ""
-    });
-    el("modal-google-simulator").hidden = true;
+    // Direct user to real Google OAuth authentication
+    window.location.href = "/auth/google";
   };
 
   if (simCustom) simCustom.addEventListener("click", handleCustomGoogleSubmit);
@@ -663,9 +695,6 @@ function setupGoogleGIS(clientId) {
           logo_alignment: "left"
         });
         container.style.display = "flex";
-        // Hide fallback button once official button is rendered
-        const fallbackBtn = el("btn-google-signin");
-        if (fallbackBtn) fallbackBtn.style.display = "none";
       }
     } catch (e) {
       console.warn("GIS initialization warning:", e);
@@ -678,28 +707,59 @@ function handleGoogleButtonClick() {
     try {
       google.accounts.id.prompt((notification) => {
         if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-          el("modal-google-simulator").hidden = false;
+          window.location.href = "/auth/google";
         }
       });
       return;
     } catch (e) {
-      console.warn("Google prompt error, opening chooser:", e);
+      console.warn("Google prompt error, redirecting:", e);
     }
   }
-  el("modal-google-simulator").hidden = false;
+  // Redirect to official Google OAuth flow
+  window.location.href = "/auth/google";
 }
 
-function handleGoogleCredentialResponse(response) {
+async function handleGoogleCredentialResponse(response) {
+  if (!response || !response.credential) {
+    showAuthToast("Google Sign-In Error", "No credential returned from Google.", "error");
+    return;
+  }
   try {
-    const payload = decodeJwtResponse(response.credential);
-    processGoogleUser({
-      name: payload.name || payload.email.split("@")[0],
-      email: payload.email,
-      sub: payload.sub,
-      picture: payload.picture || ""
+    const res = await fetch("/api/auth/google/verify-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential: response.credential })
     });
+    const data = await res.json();
+    if (!data.ok) {
+      showAuthToast("Google Verification Failed", data.error || "Could not verify Google account.", "error");
+      return;
+    }
+    if (!data.isNew && data.player) {
+      applyIdentity(data.player);
+      showAuthToast("Google Sign-In Successful", `Welcome back, ${data.player.name}!`, "success");
+      showScreen("wings");
+      refreshPlayerNameDatalist();
+      return;
+    }
+    // First time logging in with Google -> prompt to confirm role & finish signup
+    authState.pendingGoogleUser = data.googleUser;
+    const modal = el("modal-google-onboarding");
+    if (modal) {
+      el("google-onboard-name").textContent = data.googleUser.name;
+      el("google-onboard-email").textContent = data.googleUser.email;
+      const avatar = el("google-avatar-display");
+      if (avatar) {
+        if (data.googleUser.avatar) {
+          avatar.innerHTML = `<img src="${data.googleUser.avatar}" alt="Avatar">`;
+        } else {
+          avatar.textContent = (data.googleUser.name[0] || "G").toUpperCase();
+        }
+      }
+      modal.hidden = false;
+    }
   } catch (e) {
-    showAuthToast("Google Sign-In Error", "Could not parse Google credential.", "error");
+    showAuthToast("Google Sign-In Error", e.message, "error");
   }
 }
 

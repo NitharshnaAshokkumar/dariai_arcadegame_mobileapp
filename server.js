@@ -9,7 +9,29 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-let PORT = parseInt(process.env.PORT, 10) || 8765;
+// Load environment variables from .env if present
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  try {
+    const envLines = fs.readFileSync(envPath, 'utf8').split('\n');
+    for (const rawLine of envLines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eqIdx = line.indexOf('=');
+      if (eqIdx !== -1) {
+        const key = line.slice(0, eqIdx).trim();
+        const val = line.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[!] Error reading .env file:', e.message);
+  }
+}
+
+let PORT = parseInt(process.env.PORT, 10) || 8787;
 const HOST = '0.0.0.0';
 const WWW_DIR = path.join(__dirname, 'www');
 const CONFIG_DIR = path.join(os.homedir(), '.pixel_mirror');
@@ -20,22 +42,32 @@ const verificationCodes = new Map(); // email -> { code, expires }
 
 // ============================================================================
 // GOOGLE OAUTH CONFIGURATION
-// You can paste your Google Cloud Console OAuth 2.0 Client ID below,
-// OR inside 'google-auth-config.json' in the project root folder.
+// Credentials loaded dynamically from .env (GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET)
 // ============================================================================
-const GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID_HERE.apps.googleusercontent.com";
 const GOOGLE_AUTH_CONFIG_FILE = path.join(__dirname, 'google-auth-config.json');
 
 function getGoogleClientId() {
-  if (GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.includes('YOUR_GOOGLE_CLIENT_ID_HERE')) {
-    return GOOGLE_CLIENT_ID.trim();
+  if (process.env.GOOGLE_CLIENT_ID && !process.env.GOOGLE_CLIENT_ID.includes('YOUR_GOOGLE_CLIENT_ID')) {
+    return process.env.GOOGLE_CLIENT_ID.trim();
   }
   const fileCfg = readJsonFile(GOOGLE_AUTH_CONFIG_FILE, {});
-  if (fileCfg.client_id && !fileCfg.client_id.includes('YOUR_GOOGLE_CLIENT_ID_HERE')) {
+  if (fileCfg.client_id && !fileCfg.client_id.includes('YOUR_GOOGLE_CLIENT_ID')) {
     return fileCfg.client_id.trim();
   }
   const userCfg = readJsonFile(CONFIG_PATH, {});
-  return (userCfg.google_client_id || process.env.GOOGLE_CLIENT_ID || '').trim();
+  return (userCfg.google_client_id || '').trim();
+}
+
+function getGoogleClientSecret() {
+  if (process.env.GOOGLE_CLIENT_SECRET && !process.env.GOOGLE_CLIENT_SECRET.includes('YOUR_GOOGLE_CLIENT_SECRET')) {
+    return process.env.GOOGLE_CLIENT_SECRET.trim();
+  }
+  const fileCfg = readJsonFile(GOOGLE_AUTH_CONFIG_FILE, {});
+  if (fileCfg.client_secret && !fileCfg.client_secret.includes('YOUR_GOOGLE_CLIENT_SECRET')) {
+    return fileCfg.client_secret.trim();
+  }
+  const userCfg = readJsonFile(CONFIG_PATH, {});
+  return (userCfg.google_client_secret || '').trim();
 }
 
 function ensureConfigDir() {
@@ -70,7 +102,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon'
 };
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
 
@@ -85,11 +117,90 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // --- Direct Google OAuth Flow Handlers (Redirect & Callback) ---
+  if ((pathname === '/auth/google' || pathname === '/api/auth/google/login') && req.method === 'GET') {
+    const clientId = getGoogleClientId();
+    const redirectUri = 'http://127.0.0.1:8787/auth/callback';
+    const googleUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=email%20profile&prompt=select_account`;
+    res.writeHead(302, { Location: googleUrl });
+    return res.end();
+  }
+
+  if ((pathname === '/auth/callback' || pathname === '/api/auth/google/callback') && req.method === 'GET') {
+    const code = parsedUrl.searchParams.get('code');
+    const error = parsedUrl.searchParams.get('error');
+    if (error || !code) {
+      res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent(error || 'Google sign-in was cancelled.')}` });
+      return res.end();
+    }
+    const clientId = getGoogleClientId();
+    const clientSecret = getGoogleClientSecret();
+    const redirectUri = 'http://127.0.0.1:8787/auth/callback';
+
+    try {
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          code: code,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri
+        })
+      });
+      const tokenData = await tokenResp.json();
+      if (tokenData.error) {
+        res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent(tokenData.error_description || tokenData.error)}` });
+        return res.end();
+      }
+
+      const userResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      const userData = await userResp.json();
+      const cleanEmail = (userData.email || '').trim().toLowerCase();
+      const isEmailVerified = userData.verified_email === true || userData.verified_email === 'true';
+
+      if (!cleanEmail || !isEmailVerified) {
+        res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent('Google email is not verified or accessible.')}` });
+        return res.end();
+      }
+
+      const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+      let player = Object.values(pdata.players || {}).find(p => 
+        (p.googleId && p.googleId === userData.id) || (p.email && p.email.toLowerCase() === cleanEmail)
+      );
+
+      if (player) {
+        player.emailVerified = true;
+        if (userData.id && !player.googleId) player.googleId = userData.id;
+        if (userData.picture && !player.avatar) player.avatar = userData.picture;
+        writeJsonFile(PLAYERS_PATH, pdata);
+        res.writeHead(302, { Location: `/?auth_player=${encodeURIComponent(JSON.stringify(player))}` });
+        return res.end();
+      }
+
+      // New user -> redirect to client onboarding modal with verified details
+      const pending = {
+        name: userData.name || cleanEmail.split('@')[0],
+        email: cleanEmail,
+        googleId: userData.id,
+        avatar: userData.picture || ''
+      };
+      res.writeHead(302, { Location: `/?auth_new_google=${encodeURIComponent(JSON.stringify(pending))}` });
+      return res.end();
+    } catch (err) {
+      res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent(err.message)}` });
+      return res.end();
+    }
+  }
+
   // --- API Handlers ---
   if (pathname.startsWith('/api/')) {
     let bodyData = '';
     req.on('data', chunk => bodyData += chunk);
-    req.on('end', () => {
+    req.on('end', async () => {
       let body = {};
       try {
         if (bodyData) body = JSON.parse(bodyData);
@@ -127,7 +238,48 @@ const server = http.createServer((req, res) => {
         return sendJson({ ok: true });
       }
 
-      // --- Authentication & Google OAuth Handlers ---
+      // --- Authentication & Google OAuth API Handlers ---
+      if (pathname === '/api/auth/google/verify-token' && req.method === 'POST') {
+        const { credential } = body;
+        if (!credential) {
+          return sendJson({ ok: false, error: 'Google credential missing.' }, 400);
+        }
+        try {
+          const tokenResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+          const tokenInfo = await tokenResp.json();
+          if (tokenInfo.error || !tokenInfo.email) {
+            return sendJson({ ok: false, error: tokenInfo.error_description || 'Invalid Google token' }, 401);
+          }
+          if (tokenInfo.email_verified !== 'true' && tokenInfo.email_verified !== true) {
+            return sendJson({ ok: false, error: 'Google email is not verified by Google.' }, 403);
+          }
+          const cleanEmail = tokenInfo.email.trim().toLowerCase();
+          const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+          let player = Object.values(pdata.players || {}).find(p => 
+            (p.googleId && p.googleId === tokenInfo.sub) || (p.email && p.email.toLowerCase() === cleanEmail)
+          );
+          if (player) {
+            if (!player.googleId && tokenInfo.sub) player.googleId = tokenInfo.sub;
+            if (tokenInfo.picture && !player.avatar) player.avatar = tokenInfo.picture;
+            player.emailVerified = true;
+            writeJsonFile(PLAYERS_PATH, pdata);
+            return sendJson({ ok: true, isNew: false, player });
+          }
+          return sendJson({
+            ok: true,
+            isNew: true,
+            googleUser: {
+              name: tokenInfo.name || cleanEmail.split('@')[0],
+              email: cleanEmail,
+              googleId: tokenInfo.sub,
+              avatar: tokenInfo.picture || ''
+            }
+          });
+        } catch (e) {
+          return sendJson({ ok: false, error: e.message }, 500);
+        }
+      }
+
       if (pathname === '/api/auth/google/config') {
         if (req.method === 'GET') {
           return sendJson({ ok: true, clientId: getGoogleClientId() });
@@ -140,7 +292,8 @@ const server = http.createServer((req, res) => {
           try {
             writeJsonFile(GOOGLE_AUTH_CONFIG_FILE, {
               client_id: cid,
-              _instructions: "Replace client_id with your Google Cloud Console OAuth 2.0 Client ID."
+              client_secret: getGoogleClientSecret(),
+              _instructions: "Google OAuth Credentials"
             });
           } catch (e) {}
           return sendJson({ ok: true, clientId: cid });
@@ -242,7 +395,46 @@ const server = http.createServer((req, res) => {
       }
 
       if (pathname === '/api/auth/google' && req.method === 'POST') {
-        const { email, name, picture, sub } = body;
+        const { credential, email, name, picture, sub } = body;
+        
+        // If a Google GIS credential token is provided, verify directly with Google
+        if (credential) {
+          try {
+            const tokenResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+            const tokenInfo = await tokenResp.json();
+            if (tokenInfo.error || !tokenInfo.email) {
+              return sendJson({ ok: false, error: tokenInfo.error_description || 'Invalid Google credential.' }, 401);
+            }
+            if (tokenInfo.email_verified !== 'true' && tokenInfo.email_verified !== true) {
+              return sendJson({ ok: false, error: 'Google email is not verified by Google.' }, 403);
+            }
+            const cleanEmail = tokenInfo.email.trim().toLowerCase();
+            const pdata = readJsonFile(PLAYERS_PATH, { players: {} });
+            let player = Object.values(pdata.players || {}).find(p => 
+              (p.googleId && p.googleId === tokenInfo.sub) || (p.email && p.email.toLowerCase() === cleanEmail)
+            );
+            if (player) {
+              if (!player.googleId && tokenInfo.sub) player.googleId = tokenInfo.sub;
+              if (tokenInfo.picture && !player.avatar) player.avatar = tokenInfo.picture;
+              player.emailVerified = true;
+              writeJsonFile(PLAYERS_PATH, pdata);
+              return sendJson({ ok: true, isNew: false, player });
+            }
+            return sendJson({
+              ok: true,
+              isNew: true,
+              googleUser: {
+                name: tokenInfo.name || cleanEmail.split('@')[0],
+                email: cleanEmail,
+                googleId: tokenInfo.sub,
+                avatar: tokenInfo.picture || ''
+              }
+            });
+          } catch (e) {
+            return sendJson({ ok: false, error: e.message }, 500);
+          }
+        }
+
         const cleanEmail = (email || '').trim().toLowerCase();
         if (!cleanEmail) {
           return sendJson({ ok: false, error: 'Google account email missing.' }, 400);
@@ -253,25 +445,17 @@ const server = http.createServer((req, res) => {
         );
 
         if (player) {
-          if (!player.googleId && sub) {
-            player.googleId = sub;
-          }
+          if (!player.googleId && sub) player.googleId = sub;
           if (picture && !player.avatar) player.avatar = picture;
           writeJsonFile(PLAYERS_PATH, pdata);
           return sendJson({ ok: true, isNew: false, player });
         }
 
-        // Return user data so frontend can ask user to complete signup or auto-provision
+        // Only verified accounts can be created: require Google OAuth verification
         return sendJson({
-          ok: true,
-          isNew: true,
-          googleUser: {
-            name: name || cleanEmail.split('@')[0],
-            email: cleanEmail,
-            googleId: sub || 'G-' + Date.now(),
-            avatar: picture || ''
-          }
-        });
+          ok: false,
+          error: 'Account not found. Please click "Sign in with Google" to verify and create your account.'
+        }, 401);
       }
 
       if (pathname === '/api/players' && req.method === 'GET') {
@@ -399,14 +583,13 @@ server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.warn(`\n[i] Port ${PORT} is currently in use (another DaRI AI instance is already running).`);
     PORT++;
-    if (PORT <= 8775) {
+    if (PORT <= 8795) {
       console.log(`    Trying next available port: http://127.0.0.1:${PORT} ...\n`);
       setTimeout(() => {
         server.listen(PORT, HOST);
       }, 300);
     } else {
-      console.error(`[!] Unable to find a free port between 8765 and 8775.`);
-      console.error(`    To free up port 8765, run: npm run stop\n`);
+      console.error(`[!] Unable to find a free port between 8765 and 8795.`);
       process.exit(1);
     }
   } else {
@@ -418,7 +601,19 @@ server.on('error', (err) => {
 server.listen(PORT, HOST, () => {
   console.log(`\n======================================================`);
   console.log(`  DaRI AI Arcade Server Running!`);
-  console.log(`  Local URL:   http://127.0.0.1:${PORT}`);
-  console.log(`  LAN URL:     http://0.0.0.0:${PORT}`);
+  console.log(`  Local URL:       http://127.0.0.1:${PORT}`);
+  console.log(`  Google Callback: http://127.0.0.1:${PORT}/auth/callback`);
   console.log(`======================================================\n`);
+
+  // If running on 8787, optionally redirect requests from 8765 to 8787
+  if (PORT === 8787) {
+    try {
+      const helperServer = http.createServer((hReq, hRes) => {
+        hRes.writeHead(302, { Location: `http://127.0.0.1:8787${hReq.url}` });
+        hRes.end();
+      });
+      helperServer.on('error', () => { /* port in use, ignore */ });
+      helperServer.listen(8765, HOST);
+    } catch (e) {}
+  }
 });
