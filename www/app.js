@@ -542,21 +542,24 @@ async function checkOAuthRedirectParams() {
   if (params.has("auth_new_google")) {
     try {
       const pending = JSON.parse(decodeURIComponent(params.get("auth_new_google")));
-      authState.pendingGoogleUser = pending;
-      showScreen("identity");
-      const modal = el("modal-google-onboarding");
-      if (modal) {
-        el("google-onboard-name").textContent = pending.name;
-        el("google-onboard-email").textContent = pending.email;
-        const avatar = el("google-avatar-display");
-        if (avatar) {
-          if (pending.avatar) {
-            avatar.innerHTML = `<img src="${pending.avatar}" alt="Avatar">`;
-          } else {
-            avatar.textContent = (pending.name[0] || "G").toUpperCase();
-          }
-        }
-        modal.hidden = false;
+      // Auto-complete signup as participant without prompting role modal
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pending.name,
+          email: pending.email,
+          role: "participant",
+          googleId: pending.googleId,
+          avatar: pending.avatar
+        })
+      });
+      const data = await res.json();
+      if (data.player) {
+        applyIdentity(data.player);
+        showAuthToast("Google Sign-In Successful", `Welcome to DaRI AI Arcade, ${data.player.name}!`, "success");
+        await proceedAfterAuth();
+        refreshPlayerNameDatalist();
       }
     } catch (e) {
       console.error("Could not parse auth_new_google:", e);
@@ -734,28 +737,18 @@ async function handleGoogleCredentialResponse(response) {
       showAuthToast("Google Verification Failed", data.error || "Could not verify Google account.", "error");
       return;
     }
-    if (!data.isNew && data.player) {
+    if (data.player) {
       applyIdentity(data.player);
       showAuthToast("Google Sign-In Successful", `Welcome back, ${data.player.name}!`, "success");
       await proceedAfterAuth();
       refreshPlayerNameDatalist();
       return;
     }
-    // First time logging in with Google -> prompt to confirm role & finish signup
-    authState.pendingGoogleUser = data.googleUser;
-    const modal = el("modal-google-onboarding");
-    if (modal) {
-      el("google-onboard-name").textContent = data.googleUser.name;
-      el("google-onboard-email").textContent = data.googleUser.email;
-      const avatar = el("google-avatar-display");
-      if (avatar) {
-        if (data.googleUser.avatar) {
-          avatar.innerHTML = `<img src="${data.googleUser.avatar}" alt="Avatar">`;
-        } else {
-          avatar.textContent = (data.googleUser.name[0] || "G").toUpperCase();
-        }
-      }
-      modal.hidden = false;
+    // If googleUser details returned without player record, auto-create participant account
+    if (data.googleUser) {
+      authState.pendingGoogleUser = data.googleUser;
+      await finishGoogleSignup();
+      return;
     }
   } catch (e) {
     showAuthToast("Google Sign-In Error", e.message, "error");
@@ -788,27 +781,17 @@ async function processGoogleUser(googleUser) {
       return;
     }
 
-    if (!data.isNew && data.player) {
-      // User has logged in already! Log straight in
+    if (data.player) {
       showAuthToast("Google Sign-In Successful", `Welcome back, ${data.player.name}!`, "success");
       applyIdentity(data.player);
-      showScreen("wings");
+      await proceedAfterAuth();
       refreshPlayerNameDatalist();
       return;
     }
 
-    // First time logging in with Google -> prompt to confirm role & finish signup
+    // First time logging in with Google -> auto-signup as DaRI participant
     authState.pendingGoogleUser = data.googleUser || googleUser;
-    const modal = el("modal-google-onboarding");
-    el("google-onboard-name").textContent = authState.pendingGoogleUser.name;
-    el("google-onboard-email").textContent = authState.pendingGoogleUser.email;
-    const avatar = el("google-avatar-display");
-    if (authState.pendingGoogleUser.avatar) {
-      avatar.innerHTML = `<img src="${authState.pendingGoogleUser.avatar}" alt="Avatar">`;
-    } else {
-      avatar.textContent = (authState.pendingGoogleUser.name[0] || "G").toUpperCase();
-    }
-    modal.hidden = false;
+    await finishGoogleSignup();
   } catch (e) {
     showAuthToast("Network Error", e.message, "error");
   }
@@ -816,8 +799,7 @@ async function processGoogleUser(googleUser) {
 
 async function finishGoogleSignup() {
   if (!authState.pendingGoogleUser) return;
-  const roleBtn = document.querySelector("#google-role-picker .level-btn.active");
-  const role = (roleBtn && roleBtn.dataset.role) || "participant";
+  const role = "participant";
 
   try {
     const res = await fetch("/api/auth/signup", {
@@ -833,12 +815,13 @@ async function finishGoogleSignup() {
       })
     });
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Could not save profile.");
+    if (!data.ok && !data.player) throw new Error(data.error || "Could not save profile.");
 
-    el("modal-google-onboarding").hidden = true;
+    const p = data.player;
+    if (el("modal-google-onboarding")) el("modal-google-onboarding").hidden = true;
     authState.pendingGoogleUser = null;
-    showAuthToast("Welcome to DaRI AI!", `Profile registered for ${data.player.name}.`, "success");
-    applyIdentity(data.player);
+    showAuthToast("Welcome to DaRI AI!", `Profile registered for ${p.name}.`, "success");
+    applyIdentity(p);
     await proceedAfterAuth();
     refreshPlayerNameDatalist();
   } catch (e) {
@@ -1032,133 +1015,41 @@ async function resumeIdentityOrPrompt() {
   showScreen("identity");
 }
 
-// After successful authentication, present the centered role selection screen
-function proceedAfterAuth() {
-  const avatarEl = el("role-select-avatar");
-  const nameEl = el("role-select-name");
-  const emailEl = el("role-select-email");
-  if (nameEl) nameEl.textContent = identity.name || "Player";
-  if (emailEl) emailEl.textContent = identity.email || "Verified Google Account";
-  if (avatarEl) {
-    if (identity.avatar) {
-      avatarEl.innerHTML = `<img src="${identity.avatar}" alt="Avatar">`;
-    } else {
-      avatarEl.textContent = ((identity.name || "G")[0]).toUpperCase();
-    }
-  }
-
-  // Reset password field and error
-  const pwdInput = el("input-admin-mode-password");
-  if (pwdInput) pwdInput.value = "";
-  const errEl = el("admin-password-error");
-  if (errEl) errEl.hidden = true;
-
-  // Default to Participant
-  document.querySelectorAll("#mode-role-picker .level-btn").forEach((b) => {
-    b.classList.toggle("active", b.dataset.role === "participant");
-  });
-  const pwdBlock = el("admin-password-block");
-  if (pwdBlock) pwdBlock.style.display = "none";
-
-  showScreen("role-select");
-}
-const loadApiKeyThenProceed = proceedAfterAuth;
-
-function initRoleSelection() {
-  document.querySelectorAll("#mode-role-picker .level-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      document.querySelectorAll("#mode-role-picker .level-btn").forEach((x) => x.classList.remove("active"));
-      b.classList.add("active");
-      const role = b.dataset.role;
-      const pwdBlock = el("admin-password-block");
-      const errEl = el("admin-password-error");
-      if (errEl) errEl.hidden = true;
-      if (pwdBlock) {
-        if (role === "admin") {
-          pwdBlock.style.display = "block";
-          const inp = el("input-admin-mode-password");
-          if (inp) inp.focus();
-        } else {
-          pwdBlock.style.display = "none";
-        }
-      }
-    });
-  });
-
-  const confirmBtn = el("btn-confirm-role-mode");
-  if (confirmBtn) {
-    confirmBtn.addEventListener("click", handleRoleSelectionConfirm);
-  }
-
-  const pwdInput = el("input-admin-mode-password");
-  if (pwdInput) {
-    pwdInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") handleRoleSelectionConfirm();
-    });
-  }
-}
-
-async function handleRoleSelectionConfirm() {
-  const activeRoleBtn = document.querySelector("#mode-role-picker .level-btn.active");
-  const chosenRole = (activeRoleBtn && activeRoleBtn.dataset.role) || "participant";
-  const pwdInput = el("input-admin-mode-password");
-  const errEl = el("admin-password-error");
-  if (errEl) errEl.hidden = true;
-
-  if (chosenRole === "admin") {
-    const pwd = (pwdInput ? pwdInput.value : "").trim();
-    if (!pwd) {
-      if (errEl) {
-        errEl.textContent = "Please enter the admin password.";
-        errEl.hidden = false;
-      }
-      if (pwdInput) pwdInput.focus();
-      return;
-    }
-    // As requested: keep as 1234 for now, later fetched from backend
-    if (pwd !== "1234") {
-      if (errEl) {
-        errEl.textContent = "Incorrect admin password. Please try again.";
-        errEl.hidden = false;
-      }
-      if (pwdInput) pwdInput.focus();
-      return;
-    }
-
-    identity.role = "admin";
-    updateIdentityBadge();
-    applyAdminGating();
-    saveIdentityToStorage();
-
-    if (identity.id) {
-      fetch("/api/players/role", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: identity.id, role: "admin", password: pwd })
-      }).catch(() => {});
-    }
-
-    showAuthToast("Admin Verified", "Password verified. Opening OpenAI API Key configuration.", "success");
-    // Show the API key screen as requested
-    showScreen("setup");
-    return;
-  }
-
-  // Chosen role is participant -> directly launch gaming screen
-  identity.role = "participant";
+// After successful authentication, enter directly into the arcade (no frontend role selection modal)
+async function proceedAfterAuth() {
   updateIdentityBadge();
   applyAdminGating();
   saveIdentityToStorage();
 
-  if (identity.id) {
-    fetch("/api/players/role", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: identity.id, role: "participant" })
-    }).catch(() => {});
-  }
+  // Load API key in background if available
+  try {
+    const res = await fetch("/api/key");
+    const data = await res.json();
+    if (data.has_key && data.api_key) {
+      state.apiKey = data.api_key;
+    }
+  } catch (e) {}
 
-  showAuthToast("Welcome, Participant!", "Directly entering DaRI AI Arcade...", "success");
+  // If designated as admin by the backend and no API key is configured yet, open setup;
+  // otherwise, enter directly into the DaRI AI Arcade games hub
+  if (identity.role === "admin" && !state.apiKey) {
+    showScreen("setup");
+  } else {
+    showScreen("wings");
+  }
+}
+const loadApiKeyThenProceed = proceedAfterAuth;
+
+function initRoleSelection() {
+  // Deprecated: Role selection is now handled on backend via ADMIN_EMAILS.
+  // Frontend users log directly in as DaRI participants.
+  const confirmBtn = el("btn-confirm-role-mode");
+  if (confirmBtn) {
+    confirmBtn.addEventListener("click", () => showScreen("wings"));
+  }
+}
+
+async function handleRoleSelectionConfirm() {
   showScreen("wings");
 }
 

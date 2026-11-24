@@ -41,8 +41,9 @@ FRONTEND_URL=http://127.0.0.1:8787
 GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your_google_client_secret
 
-# Session Secret & Admin Password
+# Session Secret & Admin Configuration
 JWT_SECRET=super-secret-jwt-key-for-local-dev
+ADMIN_EMAILS=admin@dariai.tech,organizer@dariai.tech
 ADMIN_PASSWORD=1234
 ```
 
@@ -61,9 +62,9 @@ Open your browser at **http://127.0.0.1:8787**.
 
 ---
 
-## 🎮 Access Modes
-- **🎮 DaRI Participant**: Direct instant launch to the Arcade Hub to play solo challenges and join tournaments.
-- **🛡️ DaRI Admin**: Protected by the admin password (default: `1234`). Allows tournament hosting and configuring the OpenAI API key.
+## 🎮 Access Modes & Role Assignment
+- **🎮 DaRI Participant (Default for all frontend users)**: All users signing in via Google in the frontend are automatically authenticated as DaRI Participants and enter straight into the games arcade to play solo challenges and join tournaments.
+- **🛡️ DaRI Admin (Backend Configured)**: Designate administrative emails in `.env` under `ADMIN_EMAILS`. When a matching email logs in, the backend grants administrative privileges (OpenAI API key configuration and hosting tournaments). No role selection prompt is presented in the frontend.
 
 ---
 
@@ -73,3 +74,4 @@ To synchronize web changes and build the Android APK:
 npx cap sync android
 npm run build:apk
 ```
+

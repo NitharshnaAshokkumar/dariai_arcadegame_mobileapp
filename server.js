@@ -70,6 +70,28 @@ function getGoogleClientSecret() {
   return (userCfg.google_client_secret || '').trim();
 }
 
+// Backend-configured Admin Emails (set via ADMIN_EMAILS in .env, e.g. ADMIN_EMAILS=admin@dariai.tech,...)
+function getAdminEmails() {
+  const envEmails = (process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map(e => e.trim().toLowerCase())
+    .filter(Boolean);
+  return envEmails;
+}
+
+// Resolve user role: if email is configured in backend ADMIN_EMAILS, role is admin; otherwise participant
+function resolveUserRole(email, existingRole = 'participant') {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const adminEmails = getAdminEmails();
+  if (cleanEmail && adminEmails.includes(cleanEmail)) {
+    return 'admin';
+  }
+  if (existingRole === 'admin' && adminEmails.length === 0) {
+    return 'admin';
+  }
+  return 'participant';
+}
+
 function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -174,6 +196,7 @@ const server = http.createServer(async (req, res) => {
 
       if (player) {
         player.emailVerified = true;
+        player.role = resolveUserRole(cleanEmail, player.role);
         if (userData.id && !player.googleId) player.googleId = userData.id;
         if (userData.picture && !player.avatar) player.avatar = userData.picture;
         writeJsonFile(PLAYERS_PATH, pdata);
@@ -181,14 +204,25 @@ const server = http.createServer(async (req, res) => {
         return res.end();
       }
 
-      // New user -> redirect to client onboarding modal with verified details
-      const pending = {
+      // New user -> auto-create player as participant (or admin if configured in backend)
+      const pid = 'P' + Math.floor(1000 + Math.random() * 9000);
+      const assignedRole = resolveUserRole(cleanEmail);
+      player = {
+        id: pid,
         name: userData.name || cleanEmail.split('@')[0],
         email: cleanEmail,
+        role: assignedRole,
         googleId: userData.id,
-        avatar: userData.picture || ''
+        avatar: userData.picture || '',
+        emailVerified: true,
+        authProvider: 'google',
+        createdAt: Date.now() / 1000,
+        games: {}
       };
-      res.writeHead(302, { Location: `/?auth_new_google=${encodeURIComponent(JSON.stringify(pending))}` });
+      pdata.players = pdata.players || {};
+      pdata.players[pid] = player;
+      writeJsonFile(PLAYERS_PATH, pdata);
+      res.writeHead(302, { Location: `/?auth_player=${encodeURIComponent(JSON.stringify(player))}` });
       return res.end();
     } catch (err) {
       res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent(err.message)}` });
@@ -262,19 +296,28 @@ const server = http.createServer(async (req, res) => {
             if (!player.googleId && tokenInfo.sub) player.googleId = tokenInfo.sub;
             if (tokenInfo.picture && !player.avatar) player.avatar = tokenInfo.picture;
             player.emailVerified = true;
+            player.role = resolveUserRole(cleanEmail, player.role);
             writeJsonFile(PLAYERS_PATH, pdata);
             return sendJson({ ok: true, isNew: false, player });
           }
-          return sendJson({
-            ok: true,
-            isNew: true,
-            googleUser: {
-              name: tokenInfo.name || cleanEmail.split('@')[0],
-              email: cleanEmail,
-              googleId: tokenInfo.sub,
-              avatar: tokenInfo.picture || ''
-            }
-          });
+          const pid = 'P' + Math.floor(1000 + Math.random() * 9000);
+          const assignedRole = resolveUserRole(cleanEmail);
+          const newPlayer = {
+            id: pid,
+            name: tokenInfo.name || cleanEmail.split('@')[0],
+            email: cleanEmail,
+            role: assignedRole,
+            googleId: tokenInfo.sub,
+            avatar: tokenInfo.picture || '',
+            emailVerified: true,
+            authProvider: 'google',
+            createdAt: Date.now() / 1000,
+            games: {}
+          };
+          pdata.players = pdata.players || {};
+          pdata.players[pid] = newPlayer;
+          writeJsonFile(PLAYERS_PATH, pdata);
+          return sendJson({ ok: true, isNew: false, player: newPlayer });
         } catch (e) {
           return sendJson({ ok: false, error: e.message }, 500);
         }
@@ -343,7 +386,7 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/auth/signup' && req.method === 'POST') {
         const name = (body.name || '').trim();
         const email = (body.email || '').trim().toLowerCase();
-        const role = body.role === 'admin' ? 'admin' : 'participant';
+        const role = resolveUserRole(email);
         const googleId = body.googleId || null;
         const avatar = body.avatar || null;
 
@@ -355,6 +398,8 @@ const server = http.createServer(async (req, res) => {
           (p.email && p.email.toLowerCase() === email) || (googleId && p.googleId === googleId)
         );
         if (existing) {
+          existing.role = resolveUserRole(email, existing.role);
+          writeJsonFile(PLAYERS_PATH, pdata);
           return sendJson({ ok: false, error: 'An account with this email already exists. Please log in.', player: existing, exists: true }, 409);
         }
 
@@ -391,6 +436,8 @@ const server = http.createServer(async (req, res) => {
         if (!player) {
           return sendJson({ ok: false, notFound: true, error: 'No account found. Please sign up first.' }, 404);
         }
+        player.role = resolveUserRole(player.email, player.role);
+        writeJsonFile(PLAYERS_PATH, pdata);
         return sendJson({ ok: true, player });
       }
 
@@ -417,19 +464,28 @@ const server = http.createServer(async (req, res) => {
               if (!player.googleId && tokenInfo.sub) player.googleId = tokenInfo.sub;
               if (tokenInfo.picture && !player.avatar) player.avatar = tokenInfo.picture;
               player.emailVerified = true;
+              player.role = resolveUserRole(cleanEmail, player.role);
               writeJsonFile(PLAYERS_PATH, pdata);
               return sendJson({ ok: true, isNew: false, player });
             }
-            return sendJson({
-              ok: true,
-              isNew: true,
-              googleUser: {
-                name: tokenInfo.name || cleanEmail.split('@')[0],
-                email: cleanEmail,
-                googleId: tokenInfo.sub,
-                avatar: tokenInfo.picture || ''
-              }
-            });
+            const pid = 'P' + Math.floor(1000 + Math.random() * 9000);
+            const assignedRole = resolveUserRole(cleanEmail);
+            const newPlayer = {
+              id: pid,
+              name: tokenInfo.name || cleanEmail.split('@')[0],
+              email: cleanEmail,
+              role: assignedRole,
+              googleId: tokenInfo.sub,
+              avatar: tokenInfo.picture || '',
+              emailVerified: true,
+              authProvider: 'google',
+              createdAt: Date.now() / 1000,
+              games: {}
+            };
+            pdata.players = pdata.players || {};
+            pdata.players[pid] = newPlayer;
+            writeJsonFile(PLAYERS_PATH, pdata);
+            return sendJson({ ok: true, isNew: false, player: newPlayer });
           } catch (e) {
             return sendJson({ ok: false, error: e.message }, 500);
           }
@@ -447,6 +503,7 @@ const server = http.createServer(async (req, res) => {
         if (player) {
           if (!player.googleId && sub) player.googleId = sub;
           if (picture && !player.avatar) player.avatar = picture;
+          player.role = resolveUserRole(cleanEmail, player.role);
           writeJsonFile(PLAYERS_PATH, pdata);
           return sendJson({ ok: true, isNew: false, player });
         }

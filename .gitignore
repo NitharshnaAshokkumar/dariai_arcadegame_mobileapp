@@ -29,3 +29,6 @@ logs/
 # Environment variables
 .env
 .env.local
+
+# Temporary extraction folder
+temp_picture_mirror_app/

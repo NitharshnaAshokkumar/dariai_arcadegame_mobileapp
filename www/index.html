@@ -124,84 +124,37 @@
       </div>
     </section>
 
-    <!-- POST-LOGIN ROLE SELECTION SCREEN: Centered modal-like screen before gaming -->
-    <section id="screen-role-select" class="screen">
-      <div class="card auth-card google-only-card" style="max-width: 480px; margin: 40px auto; text-align: left;">
-        <div class="auth-header" style="text-align: center; margin-bottom: 20px;">
-          <img src="img/dari-logo-icon.png" alt="DaRI AI" class="auth-logo">
-          <h1 class="auth-title" style="font-size: 1.8rem; margin: 8px 0 4px;">Choose Access Mode</h1>
-          <p class="muted" style="font-size: 0.92rem;">Select your role for this session in DaRI AI Arcade:</p>
-        </div>
-
-        <div class="google-user-summary" style="margin-bottom: 20px;">
-          <div id="role-select-avatar" class="google-avatar-img">G</div>
-          <div class="google-user-details">
-            <div id="role-select-name" class="google-user-name">User Name</div>
-            <div class="google-verified-tag">
-              <span>✓ Verified Google Account:</span>
-              <span id="role-select-email">user@gmail.com</span>
-            </div>
+    <!-- Legacy role-select & onboarding screens kept hidden for backwards-compatible element references -->
+    <div style="display:none;" aria-hidden="true">
+      <section id="screen-role-select" class="screen">
+        <div class="card auth-card google-only-card">
+          <div id="role-select-avatar"></div>
+          <div id="role-select-name"></div>
+          <div id="role-select-email"></div>
+          <div class="level-picker" id="mode-role-picker">
+            <button type="button" class="level-btn active" data-role="participant"></button>
+            <button type="button" class="level-btn" data-role="admin"></button>
           </div>
-        </div>
-
-        <label style="margin-bottom: 8px; font-weight: 600; display: block;">Select Role:</label>
-        <div class="level-picker" id="mode-role-picker" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;">
-          <button type="button" class="level-btn active" data-role="participant" style="text-align: left; padding: 14px 18px;">
-            <span class="level-num" style="display: block; font-size: 1.05rem; font-weight: 700; color: #fff;">🎮 DaRI Participant</span>
-            <span class="level-tag" style="display: block; font-size: 0.82rem; color: #9aa0a6; margin-top: 4px;">Direct access to gaming arcade &amp; join tournaments</span>
-          </button>
-          <button type="button" class="level-btn" data-role="admin" style="text-align: left; padding: 14px 18px;">
-            <span class="level-num" style="display: block; font-size: 1.05rem; font-weight: 700; color: #f59e0b;">🛡️ DaRI Admin</span>
-            <span class="level-tag" style="display: block; font-size: 0.82rem; color: #9aa0a6; margin-top: 4px;">Configure OpenAI API key &amp; manage tournaments (Requires password)</span>
-          </button>
-        </div>
-
-        <!-- Admin Password Prompt (Revealed when Admin is selected) -->
-        <div id="admin-password-block" style="display: none; margin-bottom: 16px;">
-          <label for="input-admin-mode-password" style="font-size: 0.9rem; font-weight: 600; color: #f59e0b; margin-bottom: 6px; display: block;">Admin Password:</label>
-          <input id="input-admin-mode-password" type="password" placeholder="Enter password (default: 1234)" autocomplete="current-password" style="min-height: 48px; font-size: 1rem;">
-          <p id="admin-password-error" class="error" style="color: #ef4444; font-size: 0.85rem; margin-top: 6px;" hidden></p>
-        </div>
-
-        <button id="btn-confirm-role-mode" class="btn-primary btn-block" type="button" style="min-height: 50px; font-size: 1.05rem; font-weight: 700; margin-top: 10px;">Continue &rarr;</button>
-      </div>
-    </section>
-
-    <!-- MODAL: First-Time Google OAuth Profile Setup -->
-    <div id="modal-google-onboarding" class="auth-modal-backdrop" hidden>
-      <div class="auth-modal-card">
-        <div class="auth-modal-header">
-          <span class="google-badge-pill">Google Sign-In</span>
-          <h2>Welcome to DaRI AI Arcade!</h2>
-          <p class="muted">You're signing in with Google for the first time. Confirm your role to complete setup:</p>
-        </div>
-
-        <div class="google-user-summary">
-          <div id="google-avatar-display" class="google-avatar-img">G</div>
-          <div class="google-user-details">
-            <div id="google-onboard-name" class="google-user-name">User Name</div>
-            <div class="google-verified-tag">
-              <span>✓ Verified Google Account:</span>
-              <span id="google-onboard-email">user@gmail.com</span>
-            </div>
+          <div id="admin-password-block">
+            <input id="input-admin-mode-password" type="password">
+            <p id="admin-password-error"></p>
           </div>
+          <button id="btn-confirm-role-mode" type="button"></button>
         </div>
+      </section>
 
-        <label>Select Your DaRI Role</label>
-        <div class="level-picker" id="google-role-picker">
-          <button type="button" class="level-btn active" data-role="participant">
-            <span class="level-num">Dari Participant</span>
-            <span class="level-tag">Play solo challenges &amp; join tournaments</span>
-          </button>
-          <button type="button" class="level-btn" data-role="admin">
-            <span class="level-num">Dari Admin</span>
-            <span class="level-tag">Can also host &amp; manage tournaments</span>
-          </button>
+      <div id="modal-google-onboarding" class="auth-modal-backdrop" hidden>
+        <div class="auth-modal-card">
+          <div id="google-avatar-display"></div>
+          <div id="google-onboard-name"></div>
+          <div id="google-onboard-email"></div>
+          <div class="level-picker" id="google-role-picker">
+            <button type="button" class="level-btn active" data-role="participant"></button>
+            <button type="button" class="level-btn" data-role="admin"></button>
+          </div>
+          <button id="btn-google-complete-signup" type="button"></button>
+          <p id="google-onboard-error"></p>
         </div>
-
-        <button id="btn-google-complete-signup" class="btn-primary btn-block" type="button">Confirm &amp; Enter
-          Arcade</button>
-        <p id="google-onboard-error" class="error" hidden></p>
       </div>
     </div>
 
