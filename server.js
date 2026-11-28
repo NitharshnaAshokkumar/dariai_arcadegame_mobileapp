@@ -70,6 +70,16 @@ function getGoogleClientSecret() {
   return (userCfg.google_client_secret || '').trim();
 }
 
+function getOAuthRedirectUri(req) {
+  if (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('127.0.0.1') && !process.env.FRONTEND_URL.includes('localhost')) {
+    const base = process.env.FRONTEND_URL.replace(/\/+$/, '');
+    return `${base}/auth/callback`;
+  }
+  const host = req.headers['x-forwarded-host'] || req.headers.host || '127.0.0.1:8787';
+  const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : (host.includes('dariai.in') ? 'https' : 'http'));
+  return `${proto}://${host}/auth/callback`;
+}
+
 // Backend-configured Admin Emails (set via ADMIN_EMAILS in .env, e.g. ADMIN_EMAILS=admin@dariai.tech,...)
 function getAdminEmails() {
   const envEmails = (process.env.ADMIN_EMAILS || '')
@@ -142,7 +152,7 @@ const server = http.createServer(async (req, res) => {
   // --- Direct Google OAuth Flow Handlers (Redirect & Callback) ---
   if ((pathname === '/auth/google' || pathname === '/api/auth/google/login') && req.method === 'GET') {
     const clientId = getGoogleClientId();
-    const redirectUri = 'http://127.0.0.1:8787/auth/callback';
+    const redirectUri = getOAuthRedirectUri(req);
     const googleUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=email%20profile&prompt=select_account`;
     res.writeHead(302, { Location: googleUrl });
     return res.end();
@@ -157,7 +167,7 @@ const server = http.createServer(async (req, res) => {
     }
     const clientId = getGoogleClientId();
     const clientSecret = getGoogleClientSecret();
-    const redirectUri = 'http://127.0.0.1:8787/auth/callback';
+    const redirectUri = getOAuthRedirectUri(req);
 
     try {
       const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
